@@ -53,16 +53,22 @@ If you have a custom installation of KlipperScreen or prefer to install the add-
 - The following data should be added to your `KlipperScreen.conf` file:
 ```ini
 [include AFC_menu.conf]
+```
 
-[menu __main AFC_status]
-name: AFC
-panel: boxturtle
-icon: boxturtle
+### Moonraker Update Manager
 
-[menu __print Print_AFC_status]
-name: AFC
-panel: boxturtle
-icon: boxturtle
+If you are using the Moonraker Update Manager, you can add the following to your `moonraker.conf` file:
+
+```ini
+[update_manager afc-klipperscreen-add-on]
+type: git_repo
+path: ~/AFC-Klipper-Screen-Add-On
+origin: https://github.com/ArmoredTurtle/AFC-Klipper-Screen-Add-On.git
+managed_services: KlipperScreen
+primary_branch: main
+is_system_service: False
+info_tags:
+    desc=AFC KlipperScreen Add On
 ```
 
 # Example Images

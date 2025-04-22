@@ -65,6 +65,7 @@ type: git_repo
 path: ~/AFC-Klipper-Screen-Add-On
 origin: https://github.com/ArmoredTurtle/AFC-Klipper-Screen-Add-On.git
 primary_branch: main
+is_system_service: False
 info_tags:
     desc=AFC KlipperScreen Add On
 ```

@@ -28,6 +28,7 @@ TOOLED = "tooled"
 
 SYSTEM_TYPE_ICONS = {
     "Box_Turtle": "box_turtle_colored_logo.svg",
+    "Box Turtle": "box_turtle_colored_logo.svg",
     "HTLF": "HTLF.svg",
     "Night_Owl": "Night_Owl.svg",
 }
@@ -447,8 +448,7 @@ class Panel(ScreenPanel):
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
 
             # Get the icon filename from the mapping
-            system_type = unit.system_type.replace(" ", "_")
-            icon_filename = SYSTEM_TYPE_ICONS.get(system_type)
+            icon_filename = SYSTEM_TYPE_ICONS.get(unit.system_type)
             if icon_filename:
                 try:
                     pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(

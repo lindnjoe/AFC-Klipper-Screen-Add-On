@@ -74,7 +74,7 @@ info_tags:
 # Example Images
 ## Main Panel
 
-![Main Panel](Images/afc_lane_move.png)
+![Main Panel](Images/main_afc_panel.png)
 
 ## Filament Configuration 
 ![Filament Configuration](Images/afc_manual_filament_set.png)

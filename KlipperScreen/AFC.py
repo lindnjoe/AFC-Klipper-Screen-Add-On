@@ -27,7 +27,7 @@ LOADED = "loaded"
 TOOLED = "tooled"
 
 SYSTEM_TYPE_ICONS = {
-    "Box_Turtle": "boxturtle.svg",
+    "Box_Turtle": "box_turtle_colored_logo.svg",
     "HTLF": "HTLF.svg",
     "Night_Owl": "Night_Owl.svg",
 }

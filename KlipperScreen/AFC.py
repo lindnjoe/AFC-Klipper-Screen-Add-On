@@ -129,7 +129,7 @@ class AFClane:
             with open(spool_icon_path, 'r') as f:
                 spool_icon_svg = f.read()
 
-            weight = self.weight or 0
+            weight = self.weight or 1000
             if self.weight is None:
                 weight = 1000
             max_weight = 1000
@@ -152,7 +152,7 @@ class AFClane:
             if weight == 0:
                 fill_style = 'fill: transparent'
             else:
-                color = self.color or "#48bf53"
+                color = self.color or "#000000B3"
                 fill_style = f'fill: {color}'
 
             # Replace style in filament_base and apply transform

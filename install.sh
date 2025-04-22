@@ -159,54 +159,31 @@ function ensure_afc_config() {
   local klipperscreen_conf_file="$1"
   local include_line="[include AFC_menu.conf]"
 
-  local menu_block_1="[menu __main AFC_status]
-name: AFC
-panel: AFC
-icon: AFC"
-
-  local menu_block_2="[menu __print Print_AFC_status]
-name: AFC
-panel: AFC
-icon: AFC
-
-"
-
   local line_num
   line_num=$(grep -n '^#~#' "$klipperscreen_conf_file" | cut -d: -f1 | head -n1)
   local insert_before=${line_num:-999999}
 
   local tmp_file
   tmp_file=$(mktemp)
-
   local has_include=false
-  local has_block1=false
-  local has_block2=false
 
-  while IFS= read -r line; do
-    [[ "$line" == "$include_line" ]] && has_include=true
-    [[ "$line" == "[menu __main AFC_status]" ]] && has_block1=true
-    [[ "$line" == "[menu __print Print_AFC_status]" ]] && has_block2=true
-  done < "$klipperscreen_conf_file"
+  grep -Fxq "$include_line" "$klipperscreen_conf_file" && has_include=true
 
   local i=1
   while IFS= read -r line; do
-    if [[ $i -eq $insert_before ]]; then
-      ! $has_include && echo "$include_line" >> "$tmp_file"
-      ! $has_block1 && echo -e "\n$menu_block_1" >> "$tmp_file"
-      ! $has_block2 && echo -e "\n$menu_block_2" >> "$tmp_file"
+    if [[ $i -eq $insert_before && $has_include == false ]]; then
+      echo "$include_line" >> "$tmp_file"
     fi
     echo "$line" >> "$tmp_file"
     ((i++))
   done < "$klipperscreen_conf_file"
 
-  if [[ "$insert_before" == "999999" ]]; then
-    ! $has_include && echo "$include_line" >> "$tmp_file"
-    ! $has_block1 && echo -e "\n$menu_block_1" >> "$tmp_file"
-    ! $has_block2 && echo -e "\n$menu_block_2" >> "$tmp_file"
+  if [[ "$insert_before" == "999999" && $has_include == false ]]; then
+    echo "$include_line" >> "$tmp_file"
   fi
 
   mv "$tmp_file" "$klipperscreen_conf_file"
-  echo "[INFO] Ensured AFC KlipperScreen config in: $klipperscreen_conf_file"
+  echo "[INFO] Updated $klipperscreen_conf_file."
 }
 
 function uninstall() {
@@ -230,12 +207,6 @@ function uninstall() {
 
     # Skip the include line
     if [[ "$line" == "[include AFC_menu.conf]" ]]; then
-      continue
-    fi
-
-    # Start of a menu block to remove
-    if [[ "$line" == "[menu __main AFC_status]" || "$line" == "[menu __print Print_AFC_status]" ]]; then
-      in_block=true
       continue
     fi
 

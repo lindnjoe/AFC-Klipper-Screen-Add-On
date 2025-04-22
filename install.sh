@@ -133,7 +133,7 @@ function install_files() {
   local exclude_paths exclude_file
 
   if [ ! -L "$printer_config/AFC_menu.conf" ]; then
-    ln -s "$afc_klipperscreen_path/Klipperscreen/AFC_menu.conf" "$printer_config/AFC_menu.conf"
+    ln -s "$afc_klipperscreen_path/KlipperScreen/AFC_menu.conf" "$printer_config/AFC_menu.conf"
   fi
   if [ ! -L "$klipperscreen_dir/panels/AFC.py" ]; then
     ln -s "$afc_klipperscreen_path/KlipperScreen/AFC.py" "$klipperscreen_dir/panels/AFC.py"

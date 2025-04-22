@@ -28,7 +28,7 @@ TOOLED = "tooled"
 
 SYSTEM_TYPE_ICONS = {
     "Box_Turtle": "box_turtle_colored_logo.svg",
-    "Box Turtle": "box_turtle_colored_logo.svg",
+    "'Box Turtle'": "box_turtle_colored_logo.svg",
     "HTLF": "HTLF.svg",
     "Night_Owl": "Night_Owl.svg",
 }

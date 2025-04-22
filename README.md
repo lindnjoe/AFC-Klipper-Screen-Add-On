@@ -63,6 +63,7 @@ If you are using the Moonraker Update Manager, you can add the following to your
 [update_manager afc-klipperscreen-add-on]
 type: git_repo
 path: ~/AFC-Klipper-Screen-Add-On
+origin: https://github.com/ArmoredTurtle/AFC-Klipper-Screen-Add-On.git
 primary_branch: main
 info_tags:
     desc=AFC KlipperScreen Add On

@@ -64,7 +64,6 @@ If you are using the Moonraker Update Manager, you can add the following to your
 type: git_repo
 path: ~/AFC-Klipper-Screen-Add-On
 origin: https://github.com/ArmoredTurtle/AFC-Klipper-Screen-Add-On.git
-managed_services: KlipperScreen
 primary_branch: main
 is_system_service: False
 info_tags:

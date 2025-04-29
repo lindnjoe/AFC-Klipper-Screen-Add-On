@@ -10,6 +10,7 @@ klipperscreen_dir=$HOME/KlipperScreen
 klipperscreen_conf_file=$printer_config/KlipperScreen.conf
 afc_klipperscreen_path=$HOME/AFC-Klipper-Screen-Add-On
 test_mode=False
+min_version="v0.4.5"
 
 function show_help() {
   echo "Usage: $0 [-p <printer_config>] [-k <klipperscreen_dir>] [-h]"
@@ -17,6 +18,26 @@ function show_help() {
   echo "  -p <printer_config>    Path to the printer configuration directory (default: $HOME/printer_data/config)"
   echo "  -k <klipperscreen_dir> Path to the KlipperScreen directory (default: $HOME/KlipperScreen)"
   echo "  -h                     Show this help message"
+}
+
+function checkKlipperscreen() {
+  if [ ! -d "$klipperscreen_dir/.git" ]; then
+    echo "[ERROR] KlipperScreen repository not found at $klipperscreen_dir."
+    exit 1
+  fi
+
+  git -C "$klipperscreen_dir" fetch --tags
+
+  local current_version
+  current_version=$(git -C "$klipperscreen_dir" describe --tags --abbrev=0)
+
+  if [[ "$(printf '%s\n' "$min_version" "$current_version" | sort -V | head -n1)" != "$min_version" ]]; then
+    echo "[ERROR] KlipperScreen version $current_version is lower than the required $min_version."
+    echo "[ERROR] Please update KlipperScreen to at least version $min_version"
+    exit 1
+  fi
+
+  echo "[INFO] KlipperScreen version $current_version meets the minimum requirement of $min_version."
 }
 
 function checks() {
@@ -34,6 +55,7 @@ function checks() {
     echo "[ERROR] KlipperScreen directory is not installed or detected in $klipperscreen_dir."
     exit 1
   fi
+  checkKlipperscreen
   if [ ! -f "$printer_config"/KlipperScreen.conf ]; then
     echo "[ERROR] KlipperScreen.conf is missing. Expected path: $printer_config/KlipperScreen.conf."
     exit 1

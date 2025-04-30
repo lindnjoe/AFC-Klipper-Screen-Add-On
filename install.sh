@@ -98,12 +98,9 @@ function clone_repo() {
   fi
 }
 
-function choose_theme_and_link_icons() {
+function link_icons() {
   local styles_dir="$klipperscreen_dir/styles"
   local icons_dir="$afc_klipperscreen_path/KlipperScreen/afc_icons"
-  local default_theme="z-bolt"
-  local theme=""
-  local theme_input=""
   local icon
 
   if [ ! -d "$styles_dir" ]; then
@@ -111,44 +108,26 @@ function choose_theme_and_link_icons() {
     return 1
   fi
 
-  local themes=()
-  while IFS= read -r -d $'\0' dir; do
-    themes+=("$(basename "$dir")")
-  done < <(find "$styles_dir" -mindepth 1 -maxdepth 1 -type d -print0)
-
-  echo "[INFO] Available themes:"
-  for i in "${!themes[@]}"; do
-    echo "  $((i+1))) ${themes[$i]}"
-  done
-
-  read -rp "[INPUT] Choose a theme [default: $default_theme]: " theme_input
-
-  if [[ -z "$theme_input" ]]; then
-    theme="$default_theme"
-  elif [[ "$theme_input" =~ ^[0-9]+$ && "$theme_input" -ge 1 && "$theme_input" -le "${#themes[@]}" ]]; then
-    theme="${themes[$((theme_input - 1))]}"
-  else
-    theme="$theme_input"
-  fi
-
-  # Final check to ensure theme exists
-  if [[ ! -d "$styles_dir/$theme" ]]; then
-    echo "[ERROR] Invalid theme: $theme"
+  if [ ! -d "$icons_dir" ]; then
+    echo "[ERROR] Icons directory not found: $icons_dir"
     return 1
   fi
 
-  local theme_images_dir="$styles_dir/$theme/images"
-  mkdir -p "$theme_images_dir"
-
-  echo "[INFO] Linking icons from: $icons_dir → $theme_images_dir"
+  echo "[INFO] Linking icons to all themes in: $styles_dir"
 
   shopt -s nullglob
-  for icon in "$icons_dir"/*.svg "$icons_dir"/*.png; do
-    ln -sf "$icon" "$theme_images_dir/"
+  for theme_dir in "$styles_dir"/*/; do
+    local theme_images_dir="$theme_dir/images"
+    mkdir -p "$theme_images_dir"
+
+    echo "[INFO] Linking icons to theme: $(basename "$theme_dir")"
+    for icon in "$icons_dir"/*.svg "$icons_dir"/*.png; do
+      ln -sf "$icon" "$theme_images_dir/"
+    done
   done
   shopt -u nullglob
 
-  echo "[INFO] Icons linked into theme '$theme'"
+  echo "[INFO] Icons linked to all themes."
 }
 
 function install_files() {
@@ -281,7 +260,7 @@ main() {
   fi
   install_files
   ensure_afc_config "$klipperscreen_conf_file"
-  choose_theme_and_link_icons
+  link_icons
   echo "[INFO] AFC-Klipper-Screen-Add-On installed successfully."
   echo "[INFO] Please restart KlipperScreen to apply changes."
 }

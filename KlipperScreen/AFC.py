@@ -297,8 +297,7 @@ class Panel(ScreenPanel):
 
         self.init_layout()
         self.sensor_layout()
-        if self.spoolman is None:
-            self.create_spool_layout()
+        self.create_spool_layout()
     
     def get_afc_lanes(self):
         """
@@ -821,8 +820,7 @@ class Panel(ScreenPanel):
         Switch to the selector grid and populate input fields with the lane's information.
         """
         if self.spoolman is not None:
-            self._screen.show_popup_message(_("Spoolman not currently supported"))
-            return
+            self._screen.show_popup_message(_("Spoolman not currently supported, manual spool set available"))
 
         logging.info(f"Switching to selector grid for lane: {lane.name}")
         self.selected_lane = lane  # Store the selected lane
@@ -1770,7 +1768,7 @@ class Panel(ScreenPanel):
         main_box.set_vexpand(True)
 
         # Scrollable container for input boxes
-        self.spool_scroll = Gtk.ScrolledWindow()
+        self.spool_scroll = self._gtk.ScrolledWindow()
         self.spool_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.spool_scroll.set_hexpand(True)
         self.spool_scroll.set_vexpand(True)
@@ -2034,6 +2032,11 @@ class Panel(ScreenPanel):
         """
         logging.info(f"Update Spool button clicked with color: {self.selected_color}")
 
+        if self.spoolman is not None:
+            self._screen._send_action(button, "printer.gcode.script", {
+                "script": f"SET_SPOOL_ID LANE={self.selected_lane.name} SPOOL_ID={""}"
+            })
+
         # Handle color
         try:
             color = self.selected_color.lstrip("#")
@@ -2171,7 +2174,7 @@ class Panel(ScreenPanel):
                 grid.attach(status_dot, col_index * 3 + 1, row_index, 1, 1)  # Dot column
 
         # Add the grid to a scrolled window
-        scrolled_window = Gtk.ScrolledWindow()
+        scrolled_window = self._gtk.ScrolledWindow()
         scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scrolled_window.set_hexpand(True)
         scrolled_window.set_vexpand(True)

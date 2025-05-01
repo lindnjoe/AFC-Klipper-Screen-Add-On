@@ -2034,7 +2034,7 @@ class Panel(ScreenPanel):
 
         if self.spoolman is not None:
             self._screen._send_action(button, "printer.gcode.script", {
-                "script": f"SET_SPOOL_ID LANE={self.selected_lane.name} SPOOL_ID={""}"
+                "script": f'SET_SPOOL_ID LANE={self.selected_lane.name} SPOOL_ID=""'
             })
 
         # Handle color

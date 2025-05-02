@@ -78,7 +78,7 @@ class Hub:
         self.afc_bowden_length = afc_bowden_length
 
 class Buffer:
-    def __init__(self, state, lanes, enabled, belay):
+    def __init__(self, state, lanes, enabled, belay=None):
         self.state = state
         self.lanes = lanes
         self.enabled = enabled

@@ -206,13 +206,6 @@ class Panel(ScreenPanel):
             klipperscreendir, "afc_icons")
         self.theme_path = os.path.join(
             klipperscreendir, "styles", AFClane.theme_path, "style.css")
-        css_provider = Gtk.CssProvider()
-        css_provider.load_from_path(self.theme_path)
-
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(),
-            css_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
         self.reset_ui()
 

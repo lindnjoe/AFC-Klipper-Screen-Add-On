@@ -1038,6 +1038,7 @@ class Panel(ScreenPanel):
         # Add buttons to the box
         for t_value in options:
             item = Gtk.ModelButton(label=t_value)
+            item.get_style_context().add_class("scroll_button")
             item.set_halign(Gtk.Align.START)
             item.get_style_context().add_class("large-button")
 
@@ -1098,6 +1099,7 @@ class Panel(ScreenPanel):
         # Create buttons for each option
         for lane_name in options:
             item = Gtk.ModelButton(label=lane_name)
+            item.get_style_context().add_class("scroll_button")
             item.set_name("lane-inf-item")
             item.set_halign(Gtk.Align.FILL)
             item.get_style_context().add_class("large-button")
@@ -2245,6 +2247,9 @@ dialog button {
     background-color: rgba(20, 20, 20, 0.85);
     color: white;
     border-radius: 10px;
+}
+.scroll_button{
+    background-color: rgba(35, 35, 35, 0.85);
 }
 .bold-text {
     font-weight: bold;

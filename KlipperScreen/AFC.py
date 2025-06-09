@@ -25,6 +25,15 @@ PREP_NOT_LOAD = "prep not load"
 LOAD_NOT_PREP = "load not prep"
 LOADED = "loaded"
 TOOLED = "tooled"
+UNLOADING = "tool unloading"
+LOADING = "tool loading"
+TOOL_LOADED = 'tool loaded'
+
+RESPONSE_LOAD = 1001
+RESPONSE_EJECT = 1002
+RESPONSE_SET = 1003
+RESPONSE_UNLOAD = 1004
+RESPONSE_UNSET = 1005
 
 SYSTEM_TYPE_ICONS = {
     "Box_Turtle": "box_turtle_colored_logo.svg",
@@ -34,6 +43,11 @@ SYSTEM_TYPE_ICONS = {
     "Night_Owl": "Night_Owl.svg",
     "'NightOwl'": "Night_Owl.svg",
 }
+
+def get_widths(widget, name=None):
+    pref_min, pref_nat = widget.get_preferred_width()
+    alloc = widget.get_allocated_width()
+    logging.info(f"{name:20s} | Preferred: {pref_nat:4d}px | Allocated: {alloc:4d}px")
 
 class AFCsystem:
     def __init__(self, current_load, num_units, num_lanes, num_extruders, spoolman, current_toolchange, number_of_toolchanges, extruders, hubs, buffers):
@@ -207,15 +221,22 @@ class Panel(ScreenPanel):
         self.theme_path = os.path.join(
             klipperscreendir, "styles", AFClane.theme_path, "style.css")
 
-        self.reset_ui()
+        # Control for the update of the UI
+        self.update_info = False
+
+        self._pending_lane_grid_updates = {}
 
         result = self.apiClient.post_request("printer/afc/status", json={})
+        if not isinstance(result, dict):
+            logging.error(f"API call failed or returned invalid data: {result}")
+            # Optionally show a user-friendly error or retry
+            # Remove this panel and go back to the previous one
+            return
 
         afc_data = result.get('result', {}).get('status:', {}).get('AFC', {})
         logging.info(f"AFC Data Extracted: {afc_data}")
 
-        # Control for the update of the UI
-        self.update_info = False
+        self.reset_ui()
 
         self.afc_units = []
         self.afc_unit_names = []
@@ -235,6 +256,9 @@ class Panel(ScreenPanel):
         self.selected_color = "#000000"
         self.selected_type = None
         self.selected_weight = 0
+        self.sensor_poll_id = None  # Store the timeout ID so you can stop it if needed
+        self.start_sensor_polling()  # Start periodic sensor polling
+        self.virtual_bypass = False
 
         self.data = self.apiClient.post_request("printer/objects/list", json={})
         sensor_data = self.data.get('result', {}).get('objects', {})
@@ -242,6 +266,8 @@ class Panel(ScreenPanel):
             name for name in sensor_data
             if name.startswith("filament_switch_sensor")
         ]
+
+        self.sensors = self.fetch_sensor_data()
 
         for unit_name, unit_data in afc_data.items():
             if unit_name == "system":
@@ -302,13 +328,25 @@ class Panel(ScreenPanel):
         """
         Process the update from the printer.
         """
-        if not self.update_info:
+        if self.update_info == False:
             return
 
         api_data = self.apiClient.post_request("printer/afc/status", json={})
+        if not isinstance(api_data, dict):
+            logging.error(f"API call failed or returned invalid data: {api_data}")
+            self.update_info = False
+            self._screen.show_popup_message(_("AFC panel could not be loaded.\nCheck your printer configuration."))
+            self._screen._remove_current_panel()
+            self._screen._menu_go_back()  # Go back to main menu or previous panel
+            return
+
         afc_data = api_data.get('result', {}).get('status:', {}).get('AFC', {})
         if afc_data:
             self.update_ui(afc_data)
+        else:
+            logging.error("No AFC data found in the API response.")
+            self.update_info = False
+            return
 
         if action == "notify_gcode_response":
             if "action:cancel" in data or "action:paused" in data:
@@ -322,20 +360,54 @@ class Panel(ScreenPanel):
             return
 
     def enable_buttons(self, enable):
+        if not hasattr(self, "action_buttons") or not self.action_buttons:
+            return
         for button in self.action_buttons:
             self.action_buttons[button].set_sensitive(enable)
 
     def activate(self):
         self.update_info = True
-        # self.screen_stack.set_visible_child_name("main_grid")
-        # self.stack.set_visible_child_name("control_grid")
+        self.start_sensor_polling()  # Start polling when activated
+        if hasattr(self, "screen_stack"):
+            self.screen_stack.set_visible_child_name("main_grid")
         self.enable_buttons(self._printer.state in ("ready", "paused"))
 
     def deactivate(self):
         self.update_info = False
+        self.stop_sensor_polling()  # Stop polling when deactivated
         self.enable_buttons(False)
-        self.screen_stack.set_visible_child_name("main_grid")
-        self.stack.set_visible_child_name("control_grid")
+
+    def start_sensor_polling(self):
+        """
+        Start polling the sensor data every 10 seconds.
+        Delayed start to allow the UI to initialize properly.
+        """
+        if self.sensor_poll_id is not None:
+            GLib.source_remove(self.sensor_poll_id)
+            self.sensor_poll_id = None
+        # Only start polling if update_info is True
+        if self.update_info:
+            self.sensor_poll_id = GLib.timeout_add_seconds(10, self.poll_sensors)
+
+    def stop_sensor_polling(self):
+        """
+        Stop the sensor polling timer.
+        """
+        if self.sensor_poll_id is not None:
+            GLib.source_remove(self.sensor_poll_id)
+            self.sensor_poll_id = None
+
+    def poll_sensors(self):
+        """
+        Fetch and update sensor data. Return True to keep polling.
+        """
+        if not self.update_info:
+            return False  # Stop polling if not active
+        if not self.filament_sensors:
+            return True  # Keep polling, but nothing to do
+        sensor_data = self.fetch_sensor_data()
+        self.update_sensors(sensor_data)
+        return True  # Continue polling
 
     def process_system_data(self, system_data):
         extruders = {name: Extruder(**data) for name, data in system_data.get("extruders", {}).items()}
@@ -360,9 +432,12 @@ class Panel(ScreenPanel):
         self.screen_stack = Gtk.Stack()
         self.screen_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.screen_stack.set_transition_duration(300)
+        self.screen_stack.set_hexpand(False)
+        get_widths(self.screen_stack, "screen_stack_reset")
 
-        self.grid = Gtk.Grid(column_homogeneous=True) #AutoGrid()  
+        self.grid = Gtk.Grid(column_homogeneous=True) #AutoGrid()
         self.grid.set_vexpand(True)
+        self.grid.set_hexpand(False)
 
         self.sensor_grid = Gtk.Grid(column_homogeneous=True)
         self.grid.set_vexpand(True)
@@ -387,9 +462,10 @@ class Panel(ScreenPanel):
     def init_layout(self):
         # Extruder Tools
         extruder_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        extruder_container.set_hexpand(False)
         extruder_tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, homogeneous=False, spacing=5)
         extruder_tools.set_size_request(-1, 20)  # Fixed height
-        extruder_tools.set_hexpand(True)
+        extruder_tools.set_hexpand(False)
         extruder_tools.set_vexpand(False)
 
         current_lane = next((lane for lane in self.afc_lane_data if lane.name == self.current_load), None)
@@ -405,11 +481,13 @@ class Panel(ScreenPanel):
             ["extruder_label", "buffer_label", "loaded_label"]
         ):
             label.get_style_context().add_class(key)
-            label.set_hexpand(True)
+            label.set_hexpand(False)
             label.set_halign(Gtk.Align.FILL)
             label.set_ellipsize(Pango.EllipsizeMode.END)
+            label.set_max_width_chars(30)  # Add this line
             self.labels[key] = label
             extruder_tools.pack_start(label, True, True, 0)
+
 
         extruder_container.pack_start(extruder_tools, True, True, 0)
         self.grid.attach(extruder_container, 0, 0, 4, 1)
@@ -418,6 +496,7 @@ class Panel(ScreenPanel):
         # Units and Lanes
         self.create_unit_lane_layout()
         self.stack = Gtk.Stack()
+        self.stack.set_hexpand(False)
         self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         self.stack.set_transition_duration(300)
 
@@ -430,7 +509,12 @@ class Panel(ScreenPanel):
         self.lane_move_grid = self.create_lane_move_grid()
         self.stack.add_named(self.lane_move_grid, "lane_move_grid")
 
+        self.test_grid = self.create_test_grid()
+        self.stack.add_named(self.test_grid, "test_grid")
+
         self.grid.attach(self.stack, 0, 2, 4, 1)
+
+        logging.info(f"Screen width: {self._screen.width}")
 
     def create_unit_lane_layout(self):
         unit_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, homogeneous=False, spacing=5)
@@ -440,6 +524,7 @@ class Panel(ScreenPanel):
         
         for unit in self.afc_units:
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+            box.set_hexpand(False)
 
             # Get the icon filename from the mapping
             icon_filename = SYSTEM_TYPE_ICONS.get(unit.system_type)
@@ -486,11 +571,11 @@ class Panel(ScreenPanel):
 
             unit_expander = Gtk.Expander()
             unit_expander.set_label_widget(box)
+            unit_expander.set_halign(False)
 
             unit_expander.set_expanded(True)  # Open the first expander by default
             lane_grid = AutoGrid()
             lane_grid.set_vexpand(False)  # Ensure lane_grid does not expand vertically
-            lane_grid.set_hexpand(False)
 
             # Dynamically calculate the number of lanes per row based on screen width
             logging.info(f"Screen width: {self._screen.width}")
@@ -509,7 +594,8 @@ class Panel(ScreenPanel):
                 lane_frame.set_hexpand(False)
                 lane_frame.set_valign(Gtk.Align.START)
 
-                lane_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+                lane_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+                lane_box.set_hexpand(False)
                 lane_box.get_style_context().add_class("button_active")
 
                 lane_info_box = self.create_lane_info_box(lane)
@@ -529,10 +615,11 @@ class Panel(ScreenPanel):
                 # Attach the lane frame to the grid at the calculated position
                 lane_grid.attach(lane_frame, col, row, 1, 1)
 
-                # if lane.name == self.current_load:
-                #     lane_frame.get_style_context().add_class("highlighted-lane")
+                if lane.name == self.current_load:
+                    lane_frame.get_style_context().add_class("highlighted-lane")
 
                 # Store the lane_box for updating purposes
+                self.lane_widgets[f"{lane.name}_frame"] = lane_frame
                 self.lane_widgets[lane.name] = lane_box
 
             unit_expander.add(lane_grid)
@@ -549,6 +636,7 @@ class Panel(ScreenPanel):
 
     def create_lane_info_box(self, lane):
         lane_info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lane_info_box.set_hexpand(False)
         lane_button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         lane_button_box.set_vexpand(False)
         lane_button_box.set_size_request(-1, 30)
@@ -590,19 +678,19 @@ class Panel(ScreenPanel):
         lane_info_grid.set_hexpand(False)
         lane_info_grid.set_vexpand(False)
 
-        if status == "prep not load":
+        if status == PREP_NOT_LOAD:
             warning_label = Gtk.Label(label="Filament not detected at the extruder", wrap=True)
             warning_label.set_justify(Gtk.Justification.CENTER)
             warning_label.set_valign(Gtk.Align.START)
             lane_info_grid.attach(warning_label, 0, 0, 3, 3)
             lane_name.get_style_context().add_class("status-warning")
-        elif status == "load not prep":
+        elif status == LOAD_NOT_PREP:
             warning_label = Gtk.Label(label="Lane loaded not prepped", wrap=True)
             warning_label.set_justify(Gtk.Justification.CENTER)
             warning_label.set_valign(Gtk.Align.START)
             lane_info_grid.attach(warning_label, 0, 0, 3, 3)
             lane_name.get_style_context().add_class("status-warning")
-        elif status == "unloaded":
+        elif status == UNLOADED:
             empty_label = Gtk.Label(label="Lane Empty", wrap=True)
             empty_label.set_justify(Gtk.Justification.CENTER)
             empty_label.set_hexpand(True)
@@ -613,7 +701,6 @@ class Panel(ScreenPanel):
             lane_info_grid.attach(empty_label, 2, 2, 3, 3)
             lane_name.get_style_context().add_class("status-lane-empty")
         else:
-            # over_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
             overlay = Gtk.Overlay()
 
             # Icon button is in the background
@@ -632,7 +719,6 @@ class Panel(ScreenPanel):
             runout_menu_button.set_hexpand(True)
             runout_menu_button.get_style_context().add_class("color3")
             overlay.add_overlay(runout_menu_button)
-            # over_box.pack_start(overlay, True, True, 0)
 
             lane_info_grid.attach(overlay, 0, 0, 2, 1)
 
@@ -640,13 +726,11 @@ class Panel(ScreenPanel):
             material_button = Gtk.Label(label=f"{lane.material}")
             material_button.set_halign(Gtk.Align.FILL)
             material_button.set_hexpand(True)
-            # material_button.set_margin_start(25)
             lane_info_grid.attach(material_button, 0, 1, 1, 1)
 
             # Weight button in b3
             weight_button = Gtk.Label(label=f"{lane.weight}g")
             weight_button.set_halign(Gtk.Align.FILL)
-            # weight_button.set_margin_start(40)
             lane_info_grid.attach(weight_button, 1, 1, 1, 1)
 
             lane_action_box = self.create_lane_action_box(lane, status)
@@ -661,40 +745,111 @@ class Panel(ScreenPanel):
 
         return lane_info_grid
 
+    def create_test_grid(self):
+        """ 
+        Create a grid for testing lanes.
+        """
+
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        hbox.set_hexpand(False)
+        hbox.set_vexpand(False)
+        hbox.set_margin_top(0)
+        hbox.set_margin_bottom(5)
+        hbox.set_margin_start(10)
+        hbox.set_margin_end(10)
+        hbox.set_halign(Gtk.Align.START)
+
+        exit_button = self._gtk.Button("back", _("back"), "color2")
+        exit_button.connect("clicked", self.show_control_grid)
+        hbox.pack_start(exit_button, False, False, 5)
+
+        for unit in self.afc_units:
+            for lane in unit.lanes:
+                lane_button = Gtk.Button(label=f"Test\n{lane.name}")
+                lane_button.get_style_context().add_class("color1")
+                lane_button.connect("clicked", self.test_lane, lane)
+                hbox.pack_start(lane_button, False, False, 5)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)  # horizontal only
+        scroller.set_hexpand(True)
+        scroller.set_vexpand(False)
+        scroller.add(hbox)
+
+        return scroller
+
+    def test_lane(self, widget, lane):
+        """
+        Test the lane by sending a G-code command.
+        """
+        if not lane:
+            logging.error("No lane selected for testing.")
+            return
+        logging.info(f"Testing lane: {lane.name}")
+        self._screen._send_action(widget, "printer.gcode.script", {"script": f"TEST LANE={lane.name}"})
+
+    def lane_controls(self, widget, lane, status):
+        self.selected_lane = lane
+        buttons = [
+            {"name": _("Go Back"), "response": Gtk.ResponseType.CANCEL, "style": 'dialog-warning'}
+        ]
+        if self.virtual_bypass == True:
+            if status == TOOLED:
+                label = Gtk.Label(hexpand=True, vexpand=True, wrap=True)
+                label.set_markup(_("Virtual Bypass is enabled, and <b>{}</b> is currently loaded."
+                "\nDisable Virtual Bypass to unload <b>{}</b>.").format(lane.name, lane.name))
+                self._gtk.Dialog(_("Lane\nControl"), buttons, label, self.control_confirm)
+            else:
+                buttons.insert(0,{"name": _("Eject"), "response": RESPONSE_EJECT, "style": 'dialog-secondary'})
+
+                label = Gtk.Label(hexpand=True, vexpand=True, wrap=True)
+                label.set_markup(_("Virtual Bypass is enabled, select action for <b>{}</b>:").format(lane.name))
+                self._gtk.Dialog(_("Lane\nControl"), buttons, label, self.control_confirm)
+        else:
+            if status == LOADED:
+                buttons.insert(0,{"name": _("Load"), "response": RESPONSE_LOAD, "style": 'dialog-primary'})
+                buttons.insert(1,{"name": _("Eject"), "response": RESPONSE_EJECT, "style": 'dialog-secondary'})
+                buttons.insert(2,{"name": _("Set as current lane"), "response": RESPONSE_SET, "style": 'dialog-warning'})
+            elif status == TOOLED:
+                buttons.insert(0,{"name": _("Unload"), "response": RESPONSE_UNLOAD, "style": 'dialog-primary'})
+                buttons.insert(1,{"name": _("Unset as current lane"), "response": RESPONSE_UNSET, "style": 'dialog-secondary'})
+
+            label = Gtk.Label(hexpand=True, vexpand=True, wrap=True)
+            label.set_markup(_("Select action for <b>{}</b>:").format(lane.name))
+            self._gtk.Dialog(_("Lane\nControl"), buttons, label, self.control_confirm)
+
+    def control_confirm(self, dialog, response_id):
+        self._gtk.remove_dialog(dialog)
+        lane = self.selected_lane
+        if response_id == RESPONSE_LOAD:
+            self._screen._send_action(dialog, "printer.gcode.script", {"script": f"CHANGE_TOOL LANE={lane.name}"})
+        elif response_id == RESPONSE_UNLOAD:
+            self._screen._send_action(dialog, "printer.gcode.script", {"script": "TOOL_UNLOAD"})
+        elif response_id == RESPONSE_EJECT:
+            self._screen._send_action(dialog, "printer.gcode.script", {"script": f"LANE_UNLOAD LANE={lane.name}"})
+        elif response_id == RESPONSE_SET:
+            self._screen._send_action(dialog, "printer.gcode.script", {"script": f"SET_LANE_LOADED LANE={lane.name}"})
+        elif response_id == RESPONSE_UNSET:
+            self._screen._send_action(dialog, "printer.gcode.script", {"script": "UNSET_LANE_LOADED"})
+        elif response_id == Gtk.ResponseType.CANCEL:
+            dialog.destroy()
+
     def create_lane_action_box(self, lane, status):
         action_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, homogeneous=True, spacing=1)
-        action_box.set_hexpand(True)
+        action_box.set_hexpand(False)
         action_box.set_vexpand(True)  # Ensure unit_box does not expand vertically
 
-        load_button = Gtk.Button(label="LOAD")
-        load_button.set_halign(Gtk.Align.FILL)
-        load_button.set_hexpand(True)
-        load_button.connect("clicked", self.on_load_lane_clicked, lane)
-        load_button.get_style_context().add_class("color4")
-
-
-        eject_button = Gtk.Button(label="EJECT")
-        eject_button.set_halign(Gtk.Align.FILL)
-        eject_button.set_hexpand(True)
-        eject_button.connect("clicked", self.on_eject_lane_clicked, lane)
-        eject_button.get_style_context().add_class("color4")
-
-        unload_button = Gtk.Button(label="UNLOAD")
-        unload_button.set_halign(Gtk.Align.FILL)
-        unload_button.set_hexpand(True)
-        unload_button.connect("clicked", self.on_unload_lane_clicked, lane)
-        unload_button.get_style_context().add_class("color4")
-
-        if status == "loaded":
-            action_box.pack_start(load_button, True, True, 0)
-            action_box.pack_start(eject_button, True, True, 0)
-        elif status == "tooled":
-            action_box.pack_start(unload_button, True, True, 0)
-            action_box.pack_start(eject_button, True, True, 0)
-
-        self.action_buttons[f"{lane.name}_load_button"] = load_button
-        self.action_buttons[f"{lane.name}_eject_button"] = eject_button
-        self.action_buttons[f"{lane.name}_unload_button"] = unload_button
+        self.action_buttons[f'{lane.name}_controls'] = Gtk.Button()
+        label = Gtk.Label(label=_("Controls"))
+        label.set_halign(Gtk.Align.FILL)
+        label.set_valign(Gtk.Align.FILL)
+        self.action_buttons[f'{lane.name}_controls'].add(label)
+        self.action_buttons[f'{lane.name}_controls'].set_halign(Gtk.Align.FILL)
+        self.action_buttons[f'{lane.name}_controls'].set_hexpand(True)
+        self.action_buttons[f'{lane.name}_controls'].get_style_context().add_class("color4")
+        self.action_buttons[f'{lane.name}_controls'].get_style_context().add_class("control-button")
+        self.action_buttons[f'{lane.name}_controls'].connect("clicked", self.lane_controls, lane, status)
+        action_box.pack_start(self.action_buttons[f'{lane.name}_controls'], True, True, 0)
 
         return action_box
 
@@ -728,39 +883,28 @@ class Panel(ScreenPanel):
         button_grid.set_column_homogeneous(False)
         button_grid.set_halign(Gtk.Align.START)
 
-        temp_button = self._gtk.Button("heat-up", _("Temp"), "color2")
-        temp_button.set_halign(Gtk.Align.START)
-        self.buttons['temperature'] = temp_button
-        self.buttons['temperature'].connect("clicked", self.menu_item_clicked, {"panel": "temperature"})
-        button_grid.attach(self.buttons['temperature'], 1, 0, 1, 1)
-
-        home_button = self._gtk.Button("move", _("Move"), "color1")
-        home_button.set_halign(Gtk.Align.START)
-        self.buttons['move'] = home_button
-        self.buttons['move'].connect("clicked", self.menu_item_clicked, {"panel": "move"})
-        button_grid.attach(self.buttons['move'], 0, 0, 1, 1)
-
-        extrude_button = self._gtk.Button("extrude", _("Extrude"), "color3")
-        extrude_button.set_halign(Gtk.Align.START)
-        self.buttons['extrude'] = extrude_button
-        self.buttons['extrude'].connect("clicked", self.menu_item_clicked, {"panel": "extrude"})
-        button_grid.attach(self.buttons['extrude'], 2, 0, 1, 1)
-
-        # Add the filament sensors button
-        sensors_button = self._gtk.Button("info", _("Sensors"), "color4")
-        # sensors_button.connect("clicked", self.menu_item_clicked, {"panel": "filament_sensors"})
-        sensors_button.connect("clicked", self.show_sensor_grid)
-        button_grid.attach(sensors_button, 3, 0, 1, 1)
-
         move_button = self._gtk.Button("filament", _("Lane Move"), "color1")
         move_button.connect("clicked", self.show_lane_move_grid)
         self.action_buttons['lane_move'] = move_button
-        button_grid.attach(move_button, 4, 0, 1, 1)
+        button_grid.attach(move_button, 2, 0, 1, 1)
+
+        # Add the filament sensors button
+        sensors_button = self._gtk.Button("info", _("Sensors"), "color4")
+        sensors_button.connect("clicked", self.show_sensor_grid)
+        button_grid.attach(sensors_button, 3, 0, 1, 1)
+
+        macro_button = self._gtk.Button("custom-script", _("Macros"), "color3")
+        macro_button.set_halign(Gtk.Align.START)
+        macro_button.connect("clicked", self.afc_macros)
+        button_grid.attach(macro_button, 4, 0, 1, 1)
 
         # Add a button to navigate to more controls
         more_controls_button = self._gtk.Button("increase", _("More"), "color2")
         more_controls_button.connect("clicked", self.show_more_controls)
-        button_grid.attach(more_controls_button, 5, 0, 1, 1)
+        button_grid.attach(more_controls_button, 6, 0, 1, 1)
+
+        virtual_bypass_toggle = self.create_virtual_bypass_toggle()
+        button_grid.attach(virtual_bypass_toggle, 5, 0, 1, 1)
 
         controls_box.pack_start(button_grid, False, False, 0)
 
@@ -777,6 +921,87 @@ class Panel(ScreenPanel):
         alignment.add(controls_box)
 
         return alignment
+
+    def create_virtual_bypass_toggle(self):
+        """
+        Create the AFC Virtual Bypass toggle button.
+        This button allows the user to enable or disable the virtual bypass feature.
+        """
+
+        sensor_name = "filament_switch_sensor virtual_bypass"
+        vb_status = self.sensors.get(sensor_name, {}).get("filament_detected", False)
+        logging.info(f"Virtual Bypass status: {vb_status}")
+        self.virtual_bypass = vb_status  # Store the initial state
+
+        # Create the AFC Virtual Bypass button
+        self.action_buttons[f'afc_vb_button'] = Gtk.Button()
+
+        # Create and configure the multiline label
+        vb_label = Gtk.Label(label="Virtual\nBypass")
+        vb_label.set_halign(Gtk.Align.CENTER)
+        vb_label.set_valign(Gtk.Align.CENTER)
+        vb_label.set_line_wrap(True)
+        vb_label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        vb_label.set_ellipsize(Pango.EllipsizeMode.NONE)
+
+        self.action_buttons[f'afc_vb_button'].add(vb_label)
+        self.action_buttons[f'afc_vb_button'].show_all()  # Important to make sure the label appears
+
+        # Set initial style
+        style = self.action_buttons[f'afc_vb_button'].get_style_context()
+        style.add_class("color2")
+        style.remove_class("vb_active")
+        style.remove_class("vb_inactive")
+        if vb_status:
+            style.add_class("vb_active")
+        else:
+            style.add_class("vb_inactive")
+
+        # Store reference for updates
+        self.virtual_bypass_button = self.action_buttons[f'afc_vb_button']
+
+        # Connect the button to the toggle handler
+        self.action_buttons[f'afc_vb_button'].connect("clicked", self.on_afc_vb_toggled)
+
+        return self.action_buttons[f'afc_vb_button']
+
+
+    def on_afc_vb_toggled(self, button):
+        """
+        Handle the toggle of the AFC virtual bypass button.
+        """
+        # Toggle the state
+        new_state = not self.virtual_bypass
+        self.virtual_bypass = new_state
+
+        # Update the button style
+        style = button.get_style_context()
+        style.remove_class("vb_active")
+        style.remove_class("vb_inactive")
+        if new_state:
+            style.add_class("vb_active")
+            logging.info("AFC Virtual Bypass enabled")
+            self._screen.show_popup_message(_("Virtual Bypass enabled"), 1)
+            self._screen._ws.klippy.gcode_script("SET_FILAMENT_SENSOR SENSOR=virtual_bypass ENABLE=1")
+        else:
+            style.add_class("vb_inactive")
+            logging.info("AFC Virtual Bypass disabled")
+            self._screen.show_popup_message(_("Virtual Bypass Disabled"), 1)
+            self._screen._ws.klippy.gcode_script("SET_FILAMENT_SENSOR SENSOR=virtual_bypass ENABLE=0")
+
+    def update_virtual_bypass_toggle(self, new_status):
+        """
+        Update the Virtual Bypass toggle button if its state has changed.
+        """
+        if hasattr(self, "virtual_bypass_button"):
+            style = self.virtual_bypass_button.get_style_context()
+            style.remove_class("vb_active")
+            style.remove_class("vb_inactive")
+            if new_status:
+                style.add_class("vb_active")
+            else:
+                style.add_class("vb_inactive")
+            self.virtual_bypass = bool(new_status)
 
     def show_lane_move_grid(self, button):
         """
@@ -806,6 +1031,7 @@ class Panel(ScreenPanel):
         """
         Switch to the lane move grid.
         """
+        self.on_refresh_clicked(button)
         self.screen_stack.set_visible_child_name("sensor_grid")
 
     def show_selector_grid(self, button, lane):
@@ -813,7 +1039,7 @@ class Panel(ScreenPanel):
         Switch to the selector grid and populate input fields with the lane's information.
         """
         if self.spoolman is not None:
-            self._screen.show_popup_message(_("Spoolman not currently supported, manual spool set available"))
+            self._screen.show_popup_message(_("Spoolman not currently supported, manual spool set available"),2)
 
         logging.info(f"Switching to selector grid for lane: {lane.name}")
         self.selected_lane = lane  # Store the selected lane
@@ -907,7 +1133,7 @@ class Panel(ScreenPanel):
         Create the 'More Controls' section with additional controls like the AFC LED switch.
         """
         more_controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        more_controls_box.set_hexpand(True)
+        more_controls_box.set_hexpand(False)
         more_controls_box.set_vexpand(False)
 
         # Add a back button to return to the main controls
@@ -922,35 +1148,29 @@ class Panel(ScreenPanel):
         self.action_buttons['calibration'] = calibration_button
         more_controls_box.pack_start(calibration_button, False, False, 5)
 
-        macro_button = self._gtk.Button("custom-script", _("Macros"), "color3")
-        macro_button.set_halign(Gtk.Align.START)
-        macro_button.connect("clicked", self.afc_macros)
-        more_controls_box.pack_start(macro_button, False, False, 5)
+        test_button = self._gtk.Button("retract", _("Test"), "color1")
+        test_button.set_halign(Gtk.Align.START)
+        test_button.connect("clicked", self.on_test_clicked)
+        self.action_buttons['test'] = test_button
+        more_controls_box.pack_start(test_button, False, False, 5)
 
         # Create a vertical box to hold the label and the switch
-        afc_led_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        afc_led_box.set_halign(Gtk.Align.FILL)
-        afc_led_box.set_hexpand(False)
-        afc_led_box.set_vexpand(False)
+        afc_led_on_button = self._gtk.Button("light", _("LED ON"), "color2")
 
-        # Create a label for the switch
-        afc_led_label = Gtk.Label(label="AFC LED")
-        afc_led_label.set_halign(Gtk.Align.FILL)  # Center the label horizontally
-        afc_led_label.set_valign(Gtk.Align.END)  # Center the label vertically
-        afc_led_box.pack_start(afc_led_label, False, False, 0)
+        afc_led_on_button.connect("clicked", self.on_afc_led_on)
+        # afc_led_on_button.get_style_context().add_class("color2")
+        afc_led_on_button.get_style_context().add_class("vb_active")
 
-        # Create the AFC LED switch
-        afc_led_switch = Gtk.Switch()
-        afc_led_switch.get_style_context().add_class("filament_sensor_detected")
-        afc_led_switch.set_vexpand(False)  # Prevent vertical expansion
-        afc_led_switch.set_valign(Gtk.Align.END)  # Center the switch vertically
-        afc_led_switch.set_size_request(50, 25)  # Set a fixed size for the switch
-        afc_led_switch.set_active(True)  # Default state is "on"
-        afc_led_switch.connect("state-set", self.on_afc_led_switched)
-        afc_led_box.pack_start(afc_led_switch, False, False, 5)
+        # Create a vertical box to hold the label and the switch
+        afc_led_off_button = self._gtk.Button("light", _("LED OFF"), "color2")
+
+        afc_led_off_button.connect("clicked", self.on_afc_led_off)
+        afc_led_off_button.get_style_context().add_class("color2")
+        afc_led_off_button.get_style_context().add_class("vb_inactive")
 
         # Add the AFC LED box to the more controls box
-        more_controls_box.pack_start(afc_led_box, False, False, 5)
+        more_controls_box.pack_start(afc_led_off_button, False, False, 5)
+        more_controls_box.pack_start(afc_led_on_button, False, False, 5)
 
         return more_controls_box
 
@@ -958,31 +1178,27 @@ class Panel(ScreenPanel):
         self._screen._send_action(switch, "printer.gcode.script", {"script": "AFC_CALIBRATION"})
         logging.info("AFC Calibration button clicked")
 
+    def on_test_clicked(self, switch):
+        self.stack.set_visible_child_name("test_grid")
+        logging.info("AFC Test button clicked")
+
     def afc_macros(self, widget):
         name = "afc_macros"
         disname = self._screen._config.get_menu_name("afc", name)
         menuitems = self._screen._config.get_menu_items("afc", name)
         self._screen.show_panel("menu", disname, panel_name=name, items=menuitems)
 
-    def on_afc_led_switched(self, switch, state):
+    def on_afc_led_on(self, button):
         """
         Handle the AFC LED switch state and update its style.
         """
-        # Remove all existing CSS classes related to the switch state
-        style_context = switch.get_style_context()
-        style_context.remove_class("filament_sensor_detected")
-        style_context.remove_class("filament_sensor_empty")
+        self._screen._send_action(button, "printer.gcode.script", {"script": "TURN_ON_AFC_LED"})
 
-        if state:  # Switch is turned on
-            logging.info("AFC LED turned ON")
-            self._screen._send_action(switch, "printer.gcode.script", {"script": "TURN_ON_AFC_LED"})
-            style_context.add_class("filament_sensor_detected")  # Add the "on" style
-        else:  # Switch is turned off
-            logging.info("AFC LED turned OFF")
-            self._screen._send_action(switch, "printer.gcode.script", {"script": "TURN_OFF_AFC_LED"})
-            style_context.add_class("filament_sensor_empty")  # Add the "off" style
-
-        return True  # Allow the state change
+    def on_afc_led_off(self, button):
+        """
+        Handle the AFC LED switch state and update its style.
+        """
+        self._screen._send_action(button, "printer.gcode.script", {"script": "TURN_OFF_AFC_LED"})
 
     def create_lane_map_menu_button(self, lane):
         """
@@ -1128,7 +1344,6 @@ class Panel(ScreenPanel):
                 logging.error("Invalid AFC data received")
                 return
 
-            # logging.info(f"Full AFC data received: {afc_data}")  # Log the full data
             # Update AFCsystem attributes
             system_data = afc_data.get("system", {})
             if system_data:
@@ -1252,8 +1467,8 @@ class Panel(ScreenPanel):
     def handle_lane_status_update(self, lane, lane_status):
         logging.info(f"Handling lane status update for {lane.name}: {lane.status} → {lane_status}")
 
-        UNREADY_STATUSES = {"unloaded", "prep not load", "load not prep"}
-        READY_STATUSES = {"loaded", "tooled"}
+        UNREADY_STATUSES = {UNLOADED, PREP_NOT_LOAD, LOAD_NOT_PREP}
+        READY_STATUSES = {LOADED, TOOLED, LOADING, UNLOADING}
 
         def status_category(status):
             if status in UNREADY_STATUSES:
@@ -1263,6 +1478,15 @@ class Panel(ScreenPanel):
             return "other"
 
         old_status = lane.status  # Save the previous status
+        logging.info(f"Old status for {lane.name}: {old_status}, New status: {lane_status}")
+
+        frame_context = self.lane_widgets[f"{lane.name}_frame"].get_style_context()
+        if old_status in {UNLOADING, TOOLED} and lane_status in {LOADED, "null"}:
+            frame_context.remove_class("highlighted-lane")
+        elif lane_status in {LOADING, TOOLED, TOOL_LOADED}:
+            frame_context.add_class("highlighted-lane")
+        
+
         old_category = status_category(old_status)
         new_category = status_category(lane_status)
 
@@ -1436,16 +1660,37 @@ class Panel(ScreenPanel):
                 self.update_lane_map(lane)
 
     def replace_lane_info_grid(self, lane, lane_name, status):
-        old_grid = self.labels.get(f"{lane.name}_lane_info_grid")
-        if old_grid:
-            parent = old_grid.get_parent()
-            if parent:
-                parent.remove(old_grid)
+        # Cancel any pending update for this lane
+        if hasattr(self, '_pending_lane_grid_updates') and lane.name in self._pending_lane_grid_updates:
+            GLib.source_remove(self._pending_lane_grid_updates[lane.name])
 
-        new_grid = self.create_lane_info_grid(lane, lane_name, status)
-        if parent:
-            parent.add(new_grid)
-            new_grid.show_all()
+        def do_update():
+            old_grid = self.labels.get(f"{lane.name}_lane_info_grid")
+            parent = old_grid.get_parent() if old_grid else None
+            if old_grid and parent:
+                parent.remove(old_grid)
+            # Rebuild parent if lost
+            if not parent:
+                # Find the unit and re-add the lane frame/grid to the unit's lane_grid
+                for unit in self.afc_units:
+                    for l in unit.lanes:
+                        if l.name == lane.name:
+                            # Find the unit_expander and lane_grid
+                            # This is pseudo-code, you may need to adapt it:
+                            for child in unit_expander.get_children():
+                                if isinstance(child, AutoGrid):
+                                    parent = child
+                                    break
+            new_grid = self.create_lane_info_grid(lane, lane_name, status)
+            if parent:
+                parent.add(new_grid)
+                new_grid.show_all()
+            # Remove the pending update handle
+            del self._pending_lane_grid_updates[lane.name]
+            return False  # Only run once
+
+        # Schedule the update after 50ms
+        self._pending_lane_grid_updates[lane.name] = GLib.timeout_add(50, do_update)
 
     def update_lane_ui(self, lane):
         lane_box = self.lane_widgets.get(lane.name)
@@ -1461,15 +1706,6 @@ class Panel(ScreenPanel):
     ##################
     #    Callbacks   #
     ##################
-
-    def on_lane_button_clicked(self, button, lane):
-        logging.info(f"Lane button clicked: {lane.name}, status: {lane.status}")
-        
-        if lane.status in ("loaded", "tooled"):
-            popup = PopupWindow(self, self.grid.get_toplevel(), lane)
-            popup.show_all()
-        else:
-            return
 
     def on_icon_button_clicked(self, button, lane):
         print(f"Icon button clicked for lane: {lane.name}")
@@ -1509,41 +1745,49 @@ class Panel(ScreenPanel):
 
     def get_lane_status(self, lane):
         if lane.tool_loaded:
-            status = "tooled"
+            status = TOOLED
         elif lane.prep and lane.load and not lane.tool_loaded:
-            status = "loaded"
+            status = LOADED
         elif lane.prep and not lane.load:
-            status = "prep not load"
+            status = PREP_NOT_LOAD
         elif lane.load and not lane.prep:
-            status = "load not prep"
+            status = LOAD_NOT_PREP
         else: 
-            status = "unloaded"
+            status = UNLOADED
 
         return status
 
     def get_lane_status_from_data(self, lane_data):
-        if lane_data.get("tool_loaded"):
-            return "tooled"
-        elif lane_data.get("prep") and lane_data.get("load") and not lane_data.get("tool_loaded"):
-            return "loaded"
+        status = lane_data.get("status", False)
+        # logging.info(f"get status: {status}")
+        if lane_data.get("prep") and lane_data.get("load"):
+            if status == "Tool Loading":
+                return LOADING
+            elif status == "Tool Unloading":
+                return UNLOADING
+            elif lane_data.get("tool_loaded"):
+                return TOOLED
+            elif not lane_data.get("tool_loaded"):
+                return LOADED
+
         elif lane_data.get("prep") and not lane_data.get("load"):
-            return "prep not load"
+            return PREP_NOT_LOAD
         elif lane_data.get("load") and not lane_data.get("prep"):
-            return "load not prep"
+            return LOAD_NOT_PREP
         else:
-            return "unloaded"
+            return UNLOADED
 
     def set_lane_status(self, lane, status):
         logging.info(f"Lane {lane.name} status: {status}")
         style = []
-        if status == "tooled":
+        if status == TOOLED:
             style.append("status-tooled")
             style.append("bold-text")
-        elif status == "loaded":
+        elif status == LOADED:
             style.append("status-loaded")
-        elif status == "prep not load":
+        elif status == PREP_NOT_LOAD:
             style.append("status-warning")
-        elif status == "load not prep":
+        elif status == LOAD_NOT_PREP:
             style.append("status-warning")
         else:
             style.append("status-lane-empty")
@@ -1597,6 +1841,7 @@ class Panel(ScreenPanel):
         Create a grid of buttons to select the move distance.
         """
         distbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        distbox.set_hexpand(False)
         self.labels['move_dist'] = Gtk.Label(label="Distance (mm)")
         self.labels['move_dist'].set_halign(Gtk.Align.CENTER)
         distbox.pack_start(self.labels['move_dist'], True, True, 0)
@@ -1759,24 +2004,20 @@ class Panel(ScreenPanel):
 
         # Main container
         main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        main_box.set_hexpand(True)
+        main_box.set_hexpand(False)
         main_box.set_vexpand(True)
 
         # Scrollable container for input boxes
         self.spool_scroll = self._gtk.ScrolledWindow()
         self.spool_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.spool_scroll.set_hexpand(True)
+        self.spool_scroll.set_hexpand(False)
         self.spool_scroll.set_vexpand(True)
 
         input_grid = AutoGrid()
         input_grid.set_row_homogeneous(False)
         input_grid.set_column_homogeneous(False)
-        input_grid.set_row_spacing(10)
-        input_grid.set_column_spacing(20)
-        input_grid.set_margin_top(20)
-        input_grid.set_margin_bottom(20)
-        input_grid.set_margin_start(20)
-        input_grid.set_margin_end(20)
+        input_grid.set_halign(Gtk.Align.CENTER)
+        input_grid.set_valign(Gtk.Align.CENTER)
 
         # Title
         title_label = Gtk.Label(label="Change Spool")
@@ -1805,8 +2046,7 @@ class Panel(ScreenPanel):
         type_label.set_valign(Gtk.Align.CENTER)
         type_label.get_style_context().add_class("bold-text")
         type_input = Gtk.Entry()
-        type_input.set_hexpand(True)
-        # type_input.set_halign(Gtk.Align.START)
+        type_input.set_hexpand(False)
         type_input.set_placeholder_text("Enter filament type (e.g., PLA)")
         type_input.connect("focus-in-event", self.show_keyboard)
         type_input.connect("focus-out-event", self._screen.remove_keyboard)
@@ -1820,8 +2060,7 @@ class Panel(ScreenPanel):
         weight_label.set_valign(Gtk.Align.CENTER)
         weight_label.get_style_context().add_class("bold-text")
         weight_input = Gtk.Entry()
-        weight_input.set_hexpand(True)
-        # weight_input.set_halign(Gtk.Align.START)
+        weight_input.set_hexpand(False)
         weight_input.set_placeholder_text("Enter weight (e.g., 700)")
         weight_input.set_input_purpose(Gtk.InputPurpose.NUMBER)
         weight_input.connect("focus-in-event", self.show_keyboard)
@@ -1835,6 +2074,7 @@ class Panel(ScreenPanel):
         button_box.set_halign(Gtk.Align.CENTER)
         button_box.set_hexpand(False)
         button_box.set_vexpand(False)
+
         return_button = self._gtk.Button("back", _("Return"), "color2")
         return_button.set_halign(Gtk.Align.CENTER)
         return_button.set_valign(Gtk.Align.CENTER)
@@ -1855,7 +2095,7 @@ class Panel(ScreenPanel):
         # Add input grid to the scroll container
         self.spool_scroll.add(input_grid)
 
-        main_box.pack_start(self.spool_scroll, True, True, 5)
+        main_box.pack_start(self.spool_scroll, False, False, 5)
 
         # Attach the overlay to the selector grid
         self.selector_grid.attach(main_box, 0, 0, 1, 1)
@@ -2079,6 +2319,7 @@ class Panel(ScreenPanel):
 
     def sensor_layout(self):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        vbox.set_hexpand(False)
         vbox.set_margin_top(10)
         vbox.set_margin_bottom(10)
         vbox.set_margin_start(10)
@@ -2102,7 +2343,7 @@ class Panel(ScreenPanel):
     def create_sensor_grid(self, sensors, screen_width, sensor_data):
         # Main grid
         grid = AutoGrid()
-        grid.set_hexpand(True)
+        grid.set_hexpand(False)
         grid.set_vexpand(True)
         grid.set_column_spacing(20)  # Add more space between columns
         grid.set_row_spacing(5)
@@ -2171,7 +2412,7 @@ class Panel(ScreenPanel):
         # Add the grid to a scrolled window
         scrolled_window = self._gtk.ScrolledWindow()
         scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled_window.set_hexpand(True)
+        scrolled_window.set_hexpand(False)
         scrolled_window.set_vexpand(True)
         scrolled_window.add(grid)
 
@@ -2199,6 +2440,7 @@ class Panel(ScreenPanel):
         :return: Dictionary containing the status of the sensors.
         """
         # Here we send the request and parse the result into a dictionary
+        logging.info("Fetching filament sensor data from the printer API")
         sensor_query = "&".join(self.filament_sensors)
         result = self.apiClient.send_request(f"printer/objects/query?{sensor_query}")
         sensor_data = result.get("status", {})
@@ -2219,6 +2461,10 @@ class Panel(ScreenPanel):
                 style.remove_class("status-active")
                 style.add_class("status-active" if detected else "status-empty")
 
+        sensor_name = "filament_switch_sensor virtual_bypass"
+        vb_status = data.get(sensor_name, {}).get("filament_detected", False)
+        self.update_virtual_bypass_toggle(vb_status)
+
     def on_refresh_clicked(self, button):
         """
         Handles the refresh button click event to update the sensor states.
@@ -2235,19 +2481,14 @@ class Panel(ScreenPanel):
 ###################
 #    CSS Styles   #
 ###################
-
 # Additional CSS to style the lane boxes
 inline_provider = Gtk.CssProvider()
 inline_provider.load_from_data(b"""
-dialog {
-    background-color: rgba(100, 100, 100, 0.85);
-    color: white;
-}
 dialog label {
     color: white;
 }
 dialog button {
-    background-color: rgba(20, 20, 20, 0.85);
+    background-color: rgba(30,30,30, 0.85);
     color: white;
     border-radius: 10px;
 }
@@ -2263,6 +2504,11 @@ dialog button {
     padding-right: 40px;
     padding-top: 10px;
     padding-bottom: 10px;
+}
+.control-button {
+    font-size: 25px;
+    padding-top: 15px;
+    padding-bottom: 15px;
 }
 .small-scroll {
     -GtkScrollbar-width: 2px;
@@ -2362,6 +2608,17 @@ dialog button {
 .status-empty {
     background-color: #e32929;
     border-radius: 25px;
+}
+.vb_active {
+    box-shadow: 0 1px 12px 0 #378a3f;
+    padding-bottom: 0.1em;
+    border-bottom: .4em solid #48bf53;
+}
+.vb_inactive {
+    box-shadow: inset 0 4px 12px 0 rgba(100,100,100,0.4);
+    padding: 0.33em;
+    padding-bottom: 0.1em;
+    border-bottom: .4em solid #8c8c8c;
 }
 """)
 

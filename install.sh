@@ -10,13 +10,36 @@ klipperscreen_dir=$HOME/KlipperScreen
 klipperscreen_conf_file=$printer_config/KlipperScreen.conf
 afc_klipperscreen_path=$HOME/AFC-Klipper-Screen-Add-On
 test_mode=False
+min_version="v0.4.5"
+branch="main"
 
 function show_help() {
-  echo "Usage: $0 [-p <printer_config>] [-k <klipperscreen_dir>] [-h]"
+  echo "Usage: $0 [-p <printer_config>] [-k <klipperscreen_dir>] [-b <branch>] [-h]"
   echo "Options:"
-  echo "  -p <printer_config>    Path to the printer configuration directory (default: $HOME/printer_data/config)"
-  echo "  -k <klipperscreen_dir> Path to the KlipperScreen directory (default: $HOME/KlipperScreen)"
+  echo "  -p <printer_config>    Path to the printer configuration directory (default: \$HOME/printer_data/config)"
+  echo "  -k <klipperscreen_dir> Path to the KlipperScreen directory (default: \$HOME/KlipperScreen)"
+  echo "  -b <branch>            Git branch to use for AFC-Klipper-Screen-Add-On (default: main)"
   echo "  -h                     Show this help message"
+}
+
+function checkKlipperscreen() {
+  if [ ! -d "$klipperscreen_dir/.git" ]; then
+    echo "[ERROR] KlipperScreen repository not found at $klipperscreen_dir."
+    exit 1
+  fi
+
+  git -C "$klipperscreen_dir" fetch --tags
+
+  local current_version
+  current_version=$(git -C "$klipperscreen_dir" describe --tags --abbrev=0)
+
+  if [[ "$(printf '%s\n' "$min_version" "$current_version" | sort -V | head -n1)" != "$min_version" ]]; then
+    echo "[ERROR] KlipperScreen version $current_version is lower than the required $min_version."
+    echo "[ERROR] Please update KlipperScreen to at least version $min_version"
+    exit 1
+  fi
+
+  echo "[INFO] KlipperScreen version $current_version meets the minimum requirement of $min_version."
 }
 
 function checks() {
@@ -34,6 +57,7 @@ function checks() {
     echo "[ERROR] KlipperScreen directory is not installed or detected in $klipperscreen_dir."
     exit 1
   fi
+  checkKlipperscreen
   if [ ! -f "$printer_config"/KlipperScreen.conf ]; then
     echo "[ERROR] KlipperScreen.conf is missing. Expected path: $printer_config/KlipperScreen.conf."
     exit 1
@@ -47,7 +71,7 @@ function clone_repo() {
 
   if [ ! -d "$afc_klipperscreen_path/.git" ]; then
     echo "[INFO] AFC-Klipper-Screen-Add-On not found, cloning..."
-    if git -C "$afc_klipperscreen" clone https://github.com/ArmoredTurtle/AFC-Klipper-Screen-Add-On.git "$afc_klipperscreen_base"; then
+    if git -C "$afc_klipperscreen" clone --branch "$branch" https://github.com/ArmoredTurtle/AFC-Klipper-Screen-Add-On.git "$afc_klipperscreen_base"; then
       echo "[INFO] AFC-Klipper-Screen-Add-On cloned successfully."
     else
       echo "[ERROR] Failed to clone AFC-Klipper-Screen-Add-On."
@@ -59,29 +83,27 @@ function clone_repo() {
 
     # Fetch latest changes
     git fetch origin
-
+    git checkout "$branch"
+    git pull origin "$branch"
     local local_hash remote_hash base_hash
     local_hash=$(git rev-parse HEAD)
-    remote_hash=$(git rev-parse origin/main)
-    base_hash=$(git merge-base HEAD origin/main)
+    remote_hash=$(git rev-parse origin/"$branch")
+    base_hash=$(git merge-base HEAD origin/"$branch")
 
     if [[ "$local_hash" == "$remote_hash" ]]; then
       echo "[INFO] AFC-Klipper-Screen-Add-On is up to date."
     elif [[ "$local_hash" == "$base_hash" ]]; then
       echo "[INFO] Updates found. Pulling latest changes..."
-      git pull --ff-only
+      git pull --ff-only "$branch"
     else
       echo "[WARN] Local changes detected. Skipping pull to avoid overwriting."
     fi
   fi
 }
 
-function choose_theme_and_link_icons() {
+function link_icons() {
   local styles_dir="$klipperscreen_dir/styles"
   local icons_dir="$afc_klipperscreen_path/KlipperScreen/afc_icons"
-  local default_theme="z-bolt"
-  local theme=""
-  local theme_input=""
   local icon
 
   if [ ! -d "$styles_dir" ]; then
@@ -89,44 +111,26 @@ function choose_theme_and_link_icons() {
     return 1
   fi
 
-  local themes=()
-  while IFS= read -r -d $'\0' dir; do
-    themes+=("$(basename "$dir")")
-  done < <(find "$styles_dir" -mindepth 1 -maxdepth 1 -type d -print0)
-
-  echo "[INFO] Available themes:"
-  for i in "${!themes[@]}"; do
-    echo "  $((i+1))) ${themes[$i]}"
-  done
-
-  read -rp "[INPUT] Choose a theme [default: $default_theme]: " theme_input
-
-  if [[ -z "$theme_input" ]]; then
-    theme="$default_theme"
-  elif [[ "$theme_input" =~ ^[0-9]+$ && "$theme_input" -ge 1 && "$theme_input" -le "${#themes[@]}" ]]; then
-    theme="${themes[$((theme_input - 1))]}"
-  else
-    theme="$theme_input"
-  fi
-
-  # Final check to ensure theme exists
-  if [[ ! -d "$styles_dir/$theme" ]]; then
-    echo "[ERROR] Invalid theme: $theme"
+  if [ ! -d "$icons_dir" ]; then
+    echo "[ERROR] Icons directory not found: $icons_dir"
     return 1
   fi
 
-  local theme_images_dir="$styles_dir/$theme/images"
-  mkdir -p "$theme_images_dir"
-
-  echo "[INFO] Linking icons from: $icons_dir → $theme_images_dir"
+  echo "[INFO] Linking icons to all themes in: $styles_dir"
 
   shopt -s nullglob
-  for icon in "$icons_dir"/*.svg "$icons_dir"/*.png; do
-    ln -sf "$icon" "$theme_images_dir/"
+  for theme_dir in "$styles_dir"/*/; do
+    local theme_images_dir="$theme_dir/images"
+    mkdir -p "$theme_images_dir"
+
+    echo "[INFO] Linking icons to theme: $(basename "$theme_dir")"
+    for icon in "$icons_dir"/*.svg "$icons_dir"/*.png; do
+      ln -sf "$icon" "$theme_images_dir/"
+    done
   done
   shopt -u nullglob
 
-  echo "[INFO] Icons linked into theme '$theme'"
+  echo "[INFO] Icons linked to all themes."
 }
 
 function install_files() {
@@ -232,12 +236,15 @@ function uninstall() {
 }
 
 
-while getopts "p:k:uth" arg; do
+# In getopts loop
+while getopts "p:k:b:uth" arg; do
   case ${arg} in
   p)
     printer_config=$OPTARG ;;
   k)
     klipperscreen_dir=$OPTARG ;;
+  b)
+    branch=$OPTARG ;;
   u)
     uninstall=True ;;
   t)
@@ -259,7 +266,7 @@ main() {
   fi
   install_files
   ensure_afc_config "$klipperscreen_conf_file"
-  choose_theme_and_link_icons
+  link_icons
   echo "[INFO] AFC-Klipper-Screen-Add-On installed successfully."
   echo "[INFO] Please restart KlipperScreen to apply changes."
 }

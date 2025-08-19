@@ -2019,6 +2019,8 @@ class Panel(ScreenPanel):
         input_grid.set_column_homogeneous(False)
         input_grid.set_halign(Gtk.Align.CENTER)
         input_grid.set_valign(Gtk.Align.CENTER)
+        input_grid.set_column_spacing(15)
+        input_grid.set_row_spacing(5)
 
         # Title
         title_label = Gtk.Label(label="Change Spool")

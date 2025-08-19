@@ -896,6 +896,7 @@ class Panel(ScreenPanel):
         macro_button = self._gtk.Button("custom-script", _("Macros"), "color3")
         macro_button.set_halign(Gtk.Align.START)
         macro_button.connect("clicked", self.afc_macros)
+        self.action_buttons['afc_macros'] = macro_button
         button_grid.attach(macro_button, 4, 0, 1, 1)
 
         # Add a button to navigate to more controls

@@ -583,7 +583,7 @@ class Panel(ScreenPanel):
             # Dynamically calculate the number of lanes per row based on screen width
             logging.info(f"Screen width: {self._screen.width}")
             lane_box_width = 150 + 10  # Lane frame width + margins (adjust as needed)
-            lanes_per_row = min(3, max(1, (self._screen.width - 150) // lane_box_width)) # At least one lane per row
+            lanes_per_row = min(4, max(1, (self._screen.width - 150) // lane_box_width)) # At least one lane per row
             logging.info(f"screen width {self._screen.width}")
 
             for j, lane in enumerate(unit.lanes):

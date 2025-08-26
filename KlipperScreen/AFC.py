@@ -259,6 +259,7 @@ class Panel(ScreenPanel):
         self.sensor_poll_id = None  # Store the timeout ID so you can stop it if needed
         self.start_sensor_polling()  # Start periodic sensor polling
         self.virtual_bypass = False
+        self.led_state = False  # Track the AFC LED state
 
         self.data = self.apiClient.post_request("printer/objects/list", json={})
         sensor_data = self.data.get('result', {}).get('objects', {})
@@ -275,7 +276,9 @@ class Panel(ScreenPanel):
                 self.afc_system = self.process_system_data(unit_data)
                 self.current_load = self.afc_system.current_load
                 self.spoolman = self.afc_system.spoolman
+                self.led_state = unit_data.get("led_state", False)  # Initialize LED state
                 logging.info(f"spoolman: {self.spoolman}")
+                logging.info(f"LED state: {self.led_state}")
                 continue  # Skip the system entry
 
             if not isinstance(unit_data, dict):
@@ -580,7 +583,7 @@ class Panel(ScreenPanel):
             # Dynamically calculate the number of lanes per row based on screen width
             logging.info(f"Screen width: {self._screen.width}")
             lane_box_width = 150 + 10  # Lane frame width + margins (adjust as needed)
-            lanes_per_row = max(1, (self._screen.width - 150) // lane_box_width)  # At least one lane per row
+            lanes_per_row = min(3, max(1, (self._screen.width - 150) // lane_box_width)) # At least one lane per row
             logging.info(f"screen width {self._screen.width}")
 
             for j, lane in enumerate(unit.lanes):
@@ -589,7 +592,7 @@ class Panel(ScreenPanel):
                 col = j % lanes_per_row   # Column index within the row
 
                 lane_frame = Gtk.Frame()
-                lane_frame.set_size_request(150, 200)  # Set a fixed width for lane frames
+                lane_frame.set_size_request(150, 245)  # Set a fixed width for lane frames
                 lane_frame.set_vexpand(False)  # Ensure lane_frame does not expand vertically
                 lane_frame.set_hexpand(False)
                 lane_frame.set_valign(Gtk.Align.START)
@@ -631,12 +634,14 @@ class Panel(ScreenPanel):
 
         self.grid.attach(scroll, 0, 1, 4, 1)  # Attach unit box to grid
         self.grid.show_all()
+        GLib.idle_add(self.log_lane_widget_sizes)
 
         self.set_uniform_frame_height()
 
     def create_lane_info_box(self, lane):
         lane_info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         lane_info_box.set_hexpand(False)
+        lane_info_box.set_vexpand(False)
         lane_button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         lane_button_box.set_vexpand(False)
         lane_button_box.set_size_request(-1, 30)
@@ -837,7 +842,7 @@ class Panel(ScreenPanel):
     def create_lane_action_box(self, lane, status):
         action_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, homogeneous=True, spacing=1)
         action_box.set_hexpand(False)
-        action_box.set_vexpand(True)  # Ensure unit_box does not expand vertically
+        action_box.set_vexpand(False)  # Ensure unit_box does not expand vertically
 
         self.action_buttons[f'{lane.name}_controls'] = Gtk.Button()
         label = Gtk.Label(label=_("Controls"))
@@ -854,21 +859,32 @@ class Panel(ScreenPanel):
         return action_box
 
     def calculate_max_frame_height(self):
-        max_height = 0
+        max_height = 250
         for lane_name, lane_box in self.lane_widgets.items():
-            lane_frame = lane_box.get_parent()  # Get the parent frame of the lane_box
+            # Skip any keys ending with "_frame"
+            if lane_name.endswith("_frame"):
+                continue
+
+            # Get the parent frame of the lane_box
+            lane_frame = lane_box.get_parent()
             if lane_frame:
                 _, natural_height = lane_frame.get_preferred_height()
                 max_height = max(max_height, natural_height)
+                logging.info(f"Lane {lane_name} natural height: {natural_height}, max height so far: {max_height}")
+
+        logging.info(f"Calculated maximum frame height: {max_height}")
         return max_height
 
     def set_uniform_frame_height(self):
         max_height = self.calculate_max_frame_height()
         for lane_name, lane_box in self.lane_widgets.items():
-            lane_frame = lane_box.get_parent()  # Get the parent frame of the lane_box
+            if lane_name.endswith("_frame"):
+                continue
+
+            lane_frame = lane_box.get_parent()
             if lane_frame:
-                lane_frame.set_size_request(-1, max_height)  # Apply the maximum height
-                lane_frame.queue_resize()  # Trigger a redraw
+                lane_frame.set_size_request(-1, max_height)
+                lane_frame.queue_resize()
 
     ################
     # Controls     #
@@ -902,10 +918,14 @@ class Panel(ScreenPanel):
         # Add a button to navigate to more controls
         more_controls_button = self._gtk.Button("increase", _("More"), "color2")
         more_controls_button.connect("clicked", self.show_more_controls)
-        button_grid.attach(more_controls_button, 6, 0, 1, 1)
+        button_grid.attach(more_controls_button, 7, 0, 1, 1)
 
         virtual_bypass_toggle = self.create_virtual_bypass_toggle()
         button_grid.attach(virtual_bypass_toggle, 5, 0, 1, 1)
+
+        # Create a single AFC LED toggle button
+        afc_led_toggle = self.create_afc_led_toggle()
+        button_grid.attach(afc_led_toggle, 6, 0, 1, 1)
 
         controls_box.pack_start(button_grid, False, False, 0)
 
@@ -1155,24 +1175,6 @@ class Panel(ScreenPanel):
         self.action_buttons['test'] = test_button
         more_controls_box.pack_start(test_button, False, False, 5)
 
-        # Create a vertical box to hold the label and the switch
-        afc_led_on_button = self._gtk.Button("light", _("LED ON"), "color2")
-
-        afc_led_on_button.connect("clicked", self.on_afc_led_on)
-        # afc_led_on_button.get_style_context().add_class("color2")
-        afc_led_on_button.get_style_context().add_class("vb_active")
-
-        # Create a vertical box to hold the label and the switch
-        afc_led_off_button = self._gtk.Button("light", _("LED OFF"), "color2")
-
-        afc_led_off_button.connect("clicked", self.on_afc_led_off)
-        afc_led_off_button.get_style_context().add_class("color2")
-        afc_led_off_button.get_style_context().add_class("vb_inactive")
-
-        # Add the AFC LED box to the more controls box
-        more_controls_box.pack_start(afc_led_off_button, False, False, 5)
-        more_controls_box.pack_start(afc_led_on_button, False, False, 5)
-
         return more_controls_box
 
     def on_calibration_clicked(self, switch):
@@ -1200,6 +1202,82 @@ class Panel(ScreenPanel):
         Handle the AFC LED switch state and update its style.
         """
         self._screen._send_action(button, "printer.gcode.script", {"script": "TURN_OFF_AFC_LED"})
+
+    def create_afc_led_toggle(self):
+        """
+        Create the AFC LED toggle button.
+        This button allows the user to enable or disable the AFC LED.
+        """
+        # Create the AFC LED button
+        self.action_buttons['afc_led_button'] = Gtk.Button()
+
+        # Create and configure the multiline label
+        led_label = Gtk.Label(label="AFC\nLED")
+        led_label.set_halign(Gtk.Align.CENTER)
+        led_label.set_valign(Gtk.Align.CENTER)
+        led_label.set_line_wrap(True)
+        led_label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        led_label.set_ellipsize(Pango.EllipsizeMode.NONE)
+        led_label.set_margin_start(4)
+        led_label.set_margin_end(4)
+
+        self.action_buttons['afc_led_button'].add(led_label)
+        self.action_buttons['afc_led_button'].show_all()
+
+        # Set initial style based on current LED state
+        style = self.action_buttons['afc_led_button'].get_style_context()
+        style.add_class("color2")
+        style.remove_class("vb_active")
+        style.remove_class("vb_inactive")
+        if self.led_state:
+            style.add_class("vb_active")
+        else:
+            style.add_class("vb_inactive")
+
+        # Store reference for updates
+        self.afc_led_button = self.action_buttons['afc_led_button']
+
+        # Connect the button to the toggle handler
+        self.action_buttons['afc_led_button'].connect("clicked", self.on_afc_led_toggled)
+
+        return self.action_buttons['afc_led_button']
+
+    def on_afc_led_toggled(self, button):
+        """
+        Handle the toggle of the AFC LED button.
+        """
+        # Toggle the state
+        new_state = not self.led_state
+        self.led_state = new_state
+
+        # Update the button style
+        style = button.get_style_context()
+        style.remove_class("vb_active")
+        style.remove_class("vb_inactive")
+        if new_state:
+            style.add_class("vb_active")
+            logging.info("AFC LED enabled")
+            self._screen.show_popup_message(_("AFC LED enabled"), 1)
+            self._screen._send_action(button, "printer.gcode.script", {"script": "TURN_ON_AFC_LED"})
+        else:
+            style.add_class("vb_inactive")
+            logging.info("AFC LED disabled")
+            self._screen.show_popup_message(_("AFC LED disabled"), 1)
+            self._screen._send_action(button, "printer.gcode.script", {"script": "TURN_OFF_AFC_LED"})
+
+    def update_afc_led_toggle(self, new_status):
+        """
+        Update the AFC LED toggle button if its state has changed.
+        """
+        if hasattr(self, "afc_led_button"):
+            style = self.afc_led_button.get_style_context()
+            style.remove_class("vb_active")
+            style.remove_class("vb_inactive")
+            if new_status:
+                style.add_class("vb_active")
+            else:
+                style.add_class("vb_inactive")
+            self.led_state = bool(new_status)
 
     def create_lane_map_menu_button(self, lane):
         """
@@ -1349,6 +1427,11 @@ class Panel(ScreenPanel):
             system_data = afc_data.get("system", {})
             if system_data:
                 self.update_afc_system(system_data)
+                # Update LED state if it has changed
+                new_led_state = system_data.get("led_state", self.led_state)
+                if self.led_state != new_led_state:
+                    logging.info(f"LED state changed: {self.led_state} → {new_led_state}")
+                    self.update_afc_led_toggle(new_led_state)
 
             # Update hub statuses
             hubs_data = system_data.get("hubs", {})  # Corrected path to hubs data
@@ -2479,6 +2562,69 @@ class Panel(ScreenPanel):
         sensor_data = self.fetch_sensor_data()
         # Update the sensor grid
         self.update_sensors(sensor_data)
+
+    def log_lane_widget_sizes(self):
+        """One-shot: log frame + all children sizes for each lane."""
+        logging.info("=== AFC lane widget dump start ===")
+        for unit in self.afc_units:
+            for lane in unit.lanes:
+                frame = self.lane_widgets.get(f"{lane.name}_frame")
+                if not frame:
+                    continue
+                logging.info(f"Lane: {lane.name} (frame={frame})")
+                # recurse and log
+                def dump_widget(w, path=""):
+                    try:
+                        alloc = w.get_allocation()
+                    except Exception:
+                        alloc = None
+                    try:
+                        pref_min, pref_nat = w.get_preferred_height()
+                    except Exception:
+                        pref_min = pref_nat = None
+                    vexp = getattr(w, "get_vexpand", lambda: False)()
+                    hexp = getattr(w, "get_hexpand", lambda: False)()
+                    classes = []
+                    try:
+                        classes = list(w.get_style_context().list_classes())
+                    except Exception:
+                        pass
+                    logging.info(f"  {path}{w.__class__.__name__}: alloc={(alloc.width if alloc else None, alloc.height if alloc else None)}, preferred=(min={pref_min},nat={pref_nat}), vexpand={vexp}, hexpand={hexp}, css={classes}")
+                    # If parent is a Box, get packing info for this child
+                    parent = w.get_parent()
+                    try:
+                        if isinstance(parent, Gtk.Box):
+                            expand, fill, padding, packtype = parent.query_child_packing(w)
+                            logging.info(f"    packing expand={expand}, fill={fill}, padding={padding}, packtype={packtype}")
+                    except Exception:
+                        pass
+                    # connect one-time size-allocate to catch later changes
+                    try:
+                        w.connect("size-allocate", self.on_size_allocate, f"{lane.name}:{path}{w.__class__.__name__}")
+                    except Exception:
+                        pass
+                    # Recurse into children if container
+                    children = []
+                    try:
+                        # Gtk.Frame: get_child(), Overlay: get_children(), others: get_children()
+                        if isinstance(w, Gtk.Frame):
+                            child = w.get_child()
+                            if child:
+                                children = [child]
+                        elif isinstance(w, Gtk.Overlay):
+                            children = w.get_children()
+                        elif hasattr(w, "get_children"):
+                            children = w.get_children()
+                    except Exception:
+                        children = []
+                    for i, c in enumerate(children):
+                        dump_widget(c, path=path + f"{w.__class__.__name__}[{i}]/")
+                dump_widget(frame, path="")
+        logging.info("=== AFC lane widget dump end ===")
+        return False  # for GLib.idle_add: run once
+
+    def on_size_allocate(self, widget, allocation, name=None):
+        logging.info(f"size-allocate: {name or widget.get_name()} -> w={allocation.width}, h={allocation.height}")
 
 
 ###################

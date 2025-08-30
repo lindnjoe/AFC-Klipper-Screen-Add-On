@@ -1451,6 +1451,11 @@ class Panel(ScreenPanel):
 
                     lane_status = self.get_lane_status_from_data(lane_data)
                     lane_name = self.labels.get(f"{lane.name}")
+                    old_buffer = getattr(lane, "buffer", None)
+                    old_buffer_status = getattr(lane, "buffer_status", None)
+
+                    lane.buffer = lane_data.get("buffer", lane.buffer)
+                    lane.buffer_status = lane_data.get("buffer_status", lane.buffer_status)
 
                     if lane.status != lane_status:
                         self.handle_lane_status_update(lane, lane_status)
@@ -1481,6 +1486,10 @@ class Panel(ScreenPanel):
                     if lane.load != bool(lane_data.get("load", lane.load)):
                         lane.load = bool(lane_data.get("load", lane.load))
                         self.update_lane_load(lane)
+
+                    if lane.name == (self.afc_system.current_load if self.afc_system else None):
+                        if lane.buffer != old_buffer or lane.buffer_status != old_buffer_status:
+                            self.update_system_container()
 
         except Exception as e:
             logging.error(f"Failed to update UI: {e}")

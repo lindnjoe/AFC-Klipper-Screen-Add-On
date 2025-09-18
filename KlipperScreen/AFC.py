@@ -5,10 +5,12 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import logging
+import math
 import os.path
 import gi
 import pathlib
 import re
+import time
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GdkPixbuf, Pango, GLib
@@ -101,10 +103,11 @@ class Buffer:
         self.belay = belay
 
 class AFCunit:
-    def __init__(self, name, lanes, system_type):
+    def __init__(self, name, lanes, system_type, hubs=None):
         self.name = name
         self.lanes = lanes
         self.system_type = system_type
+        self.hubs = hubs or []
 
 class AFClane:
     def __init__(self, name, unit, lane_data):
@@ -244,6 +247,7 @@ class Panel(ScreenPanel):
         self.afc_unit_names = []
         self.afc_lane_data = []
         self.afc_lanes = []
+        self.afc_unit_map = {}
         self.afc_system = None
         self.current_load = None
         self.spoolman = None
@@ -263,11 +267,18 @@ class Panel(ScreenPanel):
         self.virtual_bypass = False
         self.led_state = False  # Track the AFC LED state
 
+        self.oams_manager_available = False
+        self.oams_object_lookup = {}
+        self._oams_status_cache = {"manager": {"timestamp": 0.0, "status": None}, "oams": {}}
+        self.oams_cache_timeout = 0.5
+
         self.data = self.apiClient.post_request("printer/objects/list", json={})
         sensor_data = self.data.get('result', {}).get('objects', {})
+        objects_list = list(sensor_data.keys()) if isinstance(sensor_data, dict) else list(sensor_data or [])
+        self._register_oams_objects(objects_list)
         self.filament_sensors = [
-            name for name in sensor_data
-            if name.startswith("filament_switch_sensor")
+            name for name in objects_list
+            if isinstance(name, str) and name.startswith("filament_switch_sensor")
         ]
 
         self.sensors = self.fetch_sensor_data()
@@ -289,6 +300,7 @@ class Panel(ScreenPanel):
 
             logging.info(f"Processing unit: {unit_name}")
             unit_lanes = []
+            unit_hubs = []
 
             system_type = unit_data.get("system", {}).get("type", "Unknown")
 
@@ -306,18 +318,22 @@ class Panel(ScreenPanel):
                 )
                 lane_obj.status = self.get_lane_status(lane_obj)
                 logging.info(f"lane status {lane_obj.status}")
- 
+
                 unit_lanes.append(lane_obj)
+                if lane_obj.hub and lane_obj.hub not in unit_hubs:
+                    unit_hubs.append(lane_obj.hub)
                 self.afc_lane_data.append(lane_obj)
                 self.afc_lanes.append(lane_obj.name)
 
-            unit_obj = AFCunit(name=unit_name, lanes=unit_lanes, system_type=system_type)
+            unit_obj = AFCunit(name=unit_name, lanes=unit_lanes, system_type=system_type, hubs=unit_hubs)
             self.afc_units.append(unit_obj)
             self.afc_unit_names.append(unit_obj.name)
 
         logging.info(f"Final AFC Lanes: {self.afc_lane_data}")
         logging.info(f"Unit names: {self.afc_unit_names}")
         logging.info(f"lane names: {self.afc_lanes}")
+
+        self.afc_unit_map = {unit.name: unit for unit in self.afc_units}
 
         self.init_layout()
         self.sensor_layout()
@@ -328,6 +344,215 @@ class Panel(ScreenPanel):
         Return the list of AFC lanes.
         """
         return self.afc_lanes
+
+    def _register_oams_objects(self, object_names):
+        self.oams_manager_available = False
+        self.oams_object_lookup.clear()
+
+        for name in object_names:
+            if not isinstance(name, str):
+                continue
+
+            lower_name = name.lower()
+            if lower_name == "oams_manager":
+                self.oams_manager_available = True
+                continue
+
+            if lower_name.startswith("oams "):
+                self._register_oams_object(name)
+
+    def _register_oams_object(self, object_name):
+        for variant in self._collect_oams_variants(object_name):
+            key = variant.lower()
+            if key:
+                self.oams_object_lookup[key] = object_name
+
+    def _collect_oams_variants(self, name):
+        variants = set()
+        if not isinstance(name, str):
+            return variants
+
+        trimmed = name.strip().replace("_", " ")
+        if not trimmed:
+            return variants
+
+        base_values = set()
+        base_values.add(trimmed)
+
+        collapsed = trimmed.replace(" ", "")
+        if collapsed:
+            base_values.add(collapsed)
+
+        lower_trimmed = trimmed.lower()
+        suffix = ""
+
+        if lower_trimmed.startswith("oams"):
+            suffix = trimmed[4:].strip()
+        else:
+            parts = trimmed.split()
+            if len(parts) > 1 and parts[0].lower() == "oams":
+                suffix = " ".join(parts[1:]).strip()
+
+        if suffix:
+            base_values.add(suffix)
+            collapsed_suffix = suffix.replace(" ", "")
+            if collapsed_suffix:
+                base_values.add(collapsed_suffix)
+                base_values.add(f"oams{collapsed_suffix}")
+            base_values.add(f"oams {suffix}")
+
+        for value in base_values:
+            if value:
+                variants.add(value)
+                variants.add(value.lower())
+                variants.add(value.upper())
+
+        return {variant for variant in variants if isinstance(variant, str) and variant.strip()}
+
+    def is_ams_lane(self, lane):
+        if not lane:
+            return False
+
+        unit = self.afc_unit_map.get(lane.unit)
+        if not unit:
+            return False
+
+        system_type = (unit.system_type or "").strip().upper()
+        if "AMS" in system_type:
+            return True
+
+        unit_name = (unit.name or "").strip().upper()
+        return "AMS" in unit_name
+
+    def _normalize_group_name(self, value):
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
+
+    def _extract_group_from_key(self, raw_key):
+        if not isinstance(raw_key, str):
+            return None
+        key = raw_key.strip()
+        if not key:
+            return None
+
+        suffix = key.split()[-1]
+        return self._normalize_group_name(suffix)
+
+    def _fetch_object_status(self, object_name, fields=None):
+        if not object_name:
+            return None
+
+        payload = {"objects": {object_name: fields or []}}
+        try:
+            result = self.apiClient.post_request("printer/objects/query", json=payload)
+        except Exception as err:
+            logging.debug(f"Failed to query object {object_name}: {err}")
+            return None
+
+        if not isinstance(result, dict):
+            return None
+
+        status = result.get("result", {}).get("status", {}).get(object_name)
+        return status if isinstance(status, dict) else None
+
+    def _fetch_oams_manager_status(self):
+        if not self.oams_manager_available:
+            return None
+
+        cache = self._oams_status_cache.get("manager", {})
+        now = time.monotonic()
+        if cache.get("status") is not None and now - cache.get("timestamp", 0.0) < self.oams_cache_timeout:
+            return cache.get("status")
+
+        status = self._fetch_object_status("oams_manager")
+        self._oams_status_cache["manager"] = {"timestamp": now, "status": status}
+        return status
+
+    def _resolve_oams_object_name(self, raw_name):
+        for variant in self._collect_oams_variants(raw_name):
+            resolved = self.oams_object_lookup.get(variant.lower())
+            if resolved:
+                return resolved
+        return None
+
+    def _fetch_oams_status(self, object_name):
+        resolved_name = self._resolve_oams_object_name(object_name)
+        if not resolved_name:
+            return None
+
+        cache = self._oams_status_cache.setdefault("oams", {}).setdefault(resolved_name, {"timestamp": 0.0, "status": None})
+        now = time.monotonic()
+        if cache.get("status") is not None and now - cache.get("timestamp", 0.0) < self.oams_cache_timeout:
+            return cache.get("status")
+
+        status = self._fetch_object_status(resolved_name, ["fps_value"])
+        cache.update({"timestamp": now, "status": status})
+        return status
+
+    def get_lane_fps_value(self, lane):
+        if not self.is_ams_lane(lane):
+            return None
+
+        lane_map = self._normalize_group_name(getattr(lane, "map", None))
+        if not lane_map:
+            return None
+
+        manager_status = self._fetch_oams_manager_status()
+        if not manager_status:
+            return None
+
+        fallback_status = None
+        for key, value in manager_status.items():
+            if key == "oams" or not isinstance(value, dict):
+                continue
+
+            current_group = self._normalize_group_name(value.get("current_group"))
+            if current_group == lane_map:
+                fallback_status = value
+                break
+
+            if not fallback_status:
+                key_group = self._extract_group_from_key(key)
+                if key_group == lane_map:
+                    fallback_status = value
+
+        if not fallback_status:
+            return None
+
+        current_oams = fallback_status.get("current_oams")
+        if not current_oams:
+            return None
+
+        oams_status = self._fetch_oams_status(current_oams)
+        if not oams_status:
+            return None
+
+        fps_value = oams_status.get("fps_value")
+        try:
+            value = float(fps_value)
+        except (TypeError, ValueError):
+            return None
+
+        if not math.isfinite(value):
+            return None
+
+        return value
+
+    def format_lane_sensor_label(self, lane):
+        fps_value = self.get_lane_fps_value(lane)
+        if fps_value is not None:
+            return f"FPS: {fps_value:.2f}"
+
+        if lane and lane.buffer and lane.buffer_status:
+            return f"Buffer: {lane.buffer} - {lane.buffer_status}"
+
+        return "Buffer: N/A"
+
+    def invalidate_oams_cache(self):
+        self._oams_status_cache["manager"] = {"timestamp": 0.0, "status": None}
+        self._oams_status_cache["oams"].clear()
         
     def process_update(self, action, data):
         """
@@ -412,6 +637,11 @@ class Panel(ScreenPanel):
             return True  # Keep polling, but nothing to do
         sensor_data = self.fetch_sensor_data()
         self.update_sensors(sensor_data)
+
+        if self.afc_system and self.afc_system.current_load:
+            current_lane = next((lane for lane in self.afc_lane_data if lane.name == self.afc_system.current_load), None)
+            if self.is_ams_lane(current_lane):
+                self.update_system_container()
         return True  # Continue polling
 
     def process_system_data(self, system_data):
@@ -477,7 +707,7 @@ class Panel(ScreenPanel):
 
         # Create labels
         extruder_label = Gtk.Label(label=f"Extruder: {current_lane.extruder}" if current_lane else "Extruder: N/A")
-        buffer_label = Gtk.Label(label=f"Buffer: {current_lane.buffer} - {current_lane.buffer_status}" if current_lane else "Buffer: N/A")
+        buffer_label = Gtk.Label(label=self.format_lane_sensor_label(current_lane))
         loaded_label = Gtk.Label(label=f"Loaded: {self.current_load}" if self.current_load else "Loaded: N/A")
 
         # Add styling and alignment
@@ -552,27 +782,40 @@ class Panel(ScreenPanel):
             unit_name_label = unit.name.replace("_", " ")
             unit_label = Gtk.Label(label=unit_name_label)
             box.pack_start(unit_label, False, False, 0)
-            unit_hub = Gtk.Label(label=" | Hub")
-            self.labels[f"{unit.name}_hub"] = unit_hub
-            box.pack_start(unit_hub, False, False, 0)
+            if unit.hubs:
+                hub_container = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+                hub_header_text = " | Hubs" if len(unit.hubs) > 1 else " | Hub"
+                hub_header = Gtk.Label(label=hub_header_text)
+                hub_container.pack_start(hub_header, False, False, 0)
 
-            # Get the initial state of the hub
-            hub_state = self.afc_system.hubs.get(unit.name).state if self.afc_system and unit.name in self.afc_system.hubs else False
-            logging.info(f"Hub state for {unit.name}: {hub_state}")
+                for hub_name in unit.hubs:
+                    hub_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+                    hub_label = Gtk.Label(label=hub_name.replace("_", " "))
+                    hub_label.set_halign(Gtk.Align.START)
 
-            # Create the status dot with the initial state
-            status_dot = Gtk.EventBox()
-            dot = Gtk.Label(label=" ")
-            dot.set_size_request(20, 20)
-            dot.set_valign(Gtk.Align.CENTER)
-            dot.set_halign(Gtk.Align.START)
-            dot.get_style_context().add_class("status-active" if hub_state else "status-empty")
-            status_dot.add(dot)
+                    status_dot = Gtk.EventBox()
+                    dot = Gtk.Label(label=" ")
+                    dot.set_size_request(20, 20)
+                    dot.set_valign(Gtk.Align.CENTER)
+                    dot.set_halign(Gtk.Align.START)
 
-            # Store the status dot reference for updates
-            self.labels[f"{unit.name}_status_dot"] = dot
+                    hub_obj = self.afc_system.hubs.get(hub_name) if self.afc_system else None
+                    hub_state = hub_obj.state if hub_obj else False
+                    logging.info(f"Hub state for {hub_name}: {hub_state}")
 
-            box.pack_start(status_dot, False, False, 0)
+                    style_context = dot.get_style_context()
+                    style_context.add_class("status-active" if hub_state else "status-empty")
+
+                    status_dot.add(dot)
+
+                    self.labels[f"{hub_name}_status_dot"] = dot
+                    self.hub_states[hub_name] = hub_state
+
+                    hub_box.pack_start(status_dot, False, False, 0)
+                    hub_box.pack_start(hub_label, False, False, 0)
+                    hub_container.pack_start(hub_box, False, False, 0)
+
+                box.pack_start(hub_container, False, False, 0)
 
             unit_expander = Gtk.Expander()
             unit_expander.set_label_widget(box)
@@ -1467,6 +1710,9 @@ class Panel(ScreenPanel):
                         logging.info(f"Updating mapping for {lane.name}: {lane.map} → {new_map}")
                         lane.map = new_map
                         self.update_lane_map(lane)
+                        if self.afc_system and lane.name == self.afc_system.current_load:
+                            self.invalidate_oams_cache()
+                            self.update_system_container()
 
                     if lane.runout_lane != lane_data.get("runout_lane", lane.runout_lane):
                         lane.runout_lane = lane_data.get("runout_lane", lane.runout_lane)
@@ -1545,6 +1791,7 @@ class Panel(ScreenPanel):
         new_current_load = system_data.get("current_load", self.afc_system.current_load)
         if self.afc_system.current_load != new_current_load:
             logging.info(f"Current load changed: {self.afc_system.current_load} → {new_current_load}")
+            self.invalidate_oams_cache()
             self.afc_system.current_load = new_current_load
             self.update_system_container()
 
@@ -1698,7 +1945,7 @@ class Panel(ScreenPanel):
             if extruder_label:
                 extruder_label.set_label("Extruder: N/A")
             if buffer_label:
-                buffer_label.set_label("Buffer: N/A")
+                buffer_label.set_label(self.format_lane_sensor_label(None))
             return
 
         # Get the current lane object
@@ -1716,8 +1963,7 @@ class Panel(ScreenPanel):
 
         # Update the buffer label
         if buffer_label:
-            buffer_text = f"Buffer: {current_lane.buffer} - {current_lane.buffer_status}" if current_lane and current_lane.buffer and current_lane.buffer_status else "Buffer: N/A"
-            buffer_label.set_label(buffer_text)
+            buffer_label.set_label(self.format_lane_sensor_label(current_lane))
 
     def on_lane_map_changed(self, menu_button, selected_value, lane, label):
         """

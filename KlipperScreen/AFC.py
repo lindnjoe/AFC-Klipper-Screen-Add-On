@@ -42,6 +42,8 @@ SYSTEM_TYPE_ICONS = {
     "'HTLF'": "HTLF.svg",
     "Night_Owl": "Night_Owl.svg",
     "'NightOwl'": "Night_Owl.svg",
+    "AMS": "box_turtle_colored_logo.svg",
+    "'AMS'": "box_turtle_colored_logo.svg",
 }
 
 def get_widths(widget, name=None):
